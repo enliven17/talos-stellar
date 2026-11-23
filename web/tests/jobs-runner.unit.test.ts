@@ -3,8 +3,10 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 const mocks = vi.hoisted(() => ({
   store: {
     reapExpiredLeases: vi.fn(),
+    expireAgedPendingJobs: vi.fn(),
     leaseBatch: vi.fn(),
     heartbeat: vi.fn(),
+    extendLease: vi.fn(),
     complete: vi.fn(),
     fail: vi.fn(),
     withLeaseFence: vi.fn(),
@@ -55,6 +57,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   __resetRegistryForTests();
   mocks.store.reapExpiredLeases.mockResolvedValue({ requeued: 0, deadLettered: 0 });
+  mocks.store.expireAgedPendingJobs.mockResolvedValue(0);
 });
 
 describe("jobs/runner — runOnce", () => {
@@ -63,7 +66,7 @@ describe("jobs/runner — runOnce", () => {
 
     const summary = await runOnce();
 
-    expect(summary).toEqual({ leased: 0, completed: 0, retried: 0, deadLettered: 0, cancelled: 0, reaped: 3 });
+    expect(summary).toEqual({ leased: 0, completed: 0, retried: 0, deadLettered: 0, cancelled: 0, reaped: 3, agedOut: 0 });
     expect(mocks.store.leaseBatch).not.toHaveBeenCalled();
   });
 
@@ -99,6 +102,7 @@ describe("jobs/runner — runOnce", () => {
     expect(ctx.leaseGeneration).toBe(4);
     expect(typeof ctx.applyEffect).toBe("function");
     expect(typeof ctx.heartbeat).toBe("function");
+    expect(typeof ctx.extendLease).toBe("function");
     expect(ctx.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -151,6 +155,49 @@ describe("jobs/runner — runOnce", () => {
     expect(mocks.store.complete).not.toHaveBeenCalled();
     expect(mocks.store.fail).not.toHaveBeenCalled();
     expect(summary.completed).toBe(0);
+  });
+
+  it("aborts signal and drops handler result without completing when heartbeat is rejected after deadline elapsed", async () => {
+    let observedAbortedInHandler = false;
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      const hb = await ctx.heartbeat();
+      expect(hb.ok).toBe(false);
+      observedAbortedInHandler = ctx.signal.aborted;
+      return { ok: true };
+    });
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+    mocks.store.heartbeat.mockResolvedValue({ ok: false, cancelled: false });
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(observedAbortedInHandler).toBe(true);
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(0);
+    expect(summary.retried).toBe(0);
+    expect(summary.deadLettered).toBe(0);
+  });
+
+  it("aborts signal and suppresses fail() when handler throws after heartbeat rejection due to expired lease", async () => {
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      const hb = await ctx.heartbeat();
+      if (!hb.ok) {
+        throw new Error("aborted due to lost lease");
+      }
+      return { ok: true };
+    });
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+    mocks.store.heartbeat.mockResolvedValue({ ok: false, cancelled: false });
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(0);
+    expect(summary.retried).toBe(0);
+    expect(summary.deadLettered).toBe(0);
   });
 
   it("counts a job cancelled mid-run and does not complete/fail it", async () => {

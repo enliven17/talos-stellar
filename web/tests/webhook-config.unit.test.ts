@@ -6,6 +6,7 @@ import {
   BACKOFF_MAX_MS,
   DELIVERY_TIMEOUT_MS,
   MAX_PAYLOAD_BYTES,
+  MAX_RESPONSE_BYTES,
   DEFAULT_LEASE_TTL_SECONDS,
   HEARTBEAT_EXTEND_SECONDS,
   DEFAULT_SECRET_ROTATION_GRACE_SECONDS,
@@ -19,6 +20,7 @@ const WEBHOOK_ENV_VARS = [
   "WEBHOOK_BACKOFF_MAX_MS",
   "WEBHOOK_DELIVERY_TIMEOUT_MS",
   "WEBHOOK_MAX_PAYLOAD_BYTES",
+  "WEBHOOK_MAX_RESPONSE_BYTES",
   "WEBHOOK_LEASE_TTL_SECONDS",
   "WEBHOOK_HEARTBEAT_EXTEND_SECONDS",
   "WEBHOOK_SECRET_ROTATION_GRACE_SECONDS",
@@ -230,6 +232,7 @@ describe("Webhook configuration module evaluation", () => {
       expect(BACKOFF_MAX_MS).toBe(60_000);
       expect(DELIVERY_TIMEOUT_MS).toBe(10_000);
       expect(MAX_PAYLOAD_BYTES).toBe(64_000);
+      expect(MAX_RESPONSE_BYTES).toBe(10_000);
       expect(DEFAULT_LEASE_TTL_SECONDS).toBe(300);
       expect(HEARTBEAT_EXTEND_SECONDS).toBe(300);
       expect(DEFAULT_SECRET_ROTATION_GRACE_SECONDS).toBe(86_400);
@@ -244,6 +247,7 @@ describe("Webhook configuration module evaluation", () => {
         BACKOFF_MAX_MS,
         DELIVERY_TIMEOUT_MS,
         MAX_PAYLOAD_BYTES,
+        MAX_RESPONSE_BYTES,
         DEFAULT_LEASE_TTL_SECONDS,
         HEARTBEAT_EXTEND_SECONDS,
         DEFAULT_SECRET_ROTATION_GRACE_SECONDS,
@@ -264,6 +268,7 @@ describe("Webhook configuration module evaluation", () => {
       process.env.WEBHOOK_BACKOFF_MAX_MS = "120000";
       process.env.WEBHOOK_DELIVERY_TIMEOUT_MS = "15000";
       process.env.WEBHOOK_MAX_PAYLOAD_BYTES = "128000";
+      process.env.WEBHOOK_MAX_RESPONSE_BYTES = "20000";
       process.env.WEBHOOK_LEASE_TTL_SECONDS = "600";
       process.env.WEBHOOK_HEARTBEAT_EXTEND_SECONDS = "450";
       process.env.WEBHOOK_SECRET_ROTATION_GRACE_SECONDS = "172800";
@@ -274,6 +279,7 @@ describe("Webhook configuration module evaluation", () => {
       expect(mod.BACKOFF_MAX_MS).toBe(120000);
       expect(mod.DELIVERY_TIMEOUT_MS).toBe(15000);
       expect(mod.MAX_PAYLOAD_BYTES).toBe(128000);
+      expect(mod.MAX_RESPONSE_BYTES).toBe(20000);
       expect(mod.DEFAULT_LEASE_TTL_SECONDS).toBe(600);
       expect(mod.HEARTBEAT_EXTEND_SECONDS).toBe(450);
       expect(mod.DEFAULT_SECRET_ROTATION_GRACE_SECONDS).toBe(172800);

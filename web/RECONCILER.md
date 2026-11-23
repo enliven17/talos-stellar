@@ -66,7 +66,21 @@ Transitions are purely functional and validated (`validateTransition`) before an
 6. **`CONFIRMING` → `FAILED`**: Defensively permitted if chain data indicates operation-level failure.
 7. **`CONFIRMING` → `EXPIRED`**: Exceeds ledger gap or wall-clock `expiresAt` while confirming.
 8. **Transient Horizon Errors**: Network errors, HTTP 429 (rate limit), and HTTP 5xx responses increment `pollCount` and set `lastError`, but leave the record in `PENDING` for the next tick.
-9. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
+9. **Network Identity Pinning & Rejection**: Transactions are pinned to a specific Stellar network identity (passphrase). Any Horizon observation whose network passphrase does not match the pinned network is rejected: the record remains active (in `PENDING` or `CONFIRMING`), `pollCount` is incremented, and `lastError` logs the rejection (`Rejected observation from foreign network...`) without altering financial settlement state or triggering downstream repair.
+10. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
+
+### Payment Finality Evidence Trail
+
+Whenever the reconciler computes a finality transition decision, it captures an immutable evidence record:
+- **`ledger`**: The closed ledger sequence number at which the observation or decision occurred (e.g. `pollResult.ledger` or `currentLedger`).
+- **`observationSource`**: The source subsystem yielding the decision:
+  - `"horizon"`: On-chain transaction observation via Horizon API.
+  - `"wall_clock"`: System clock comparison against configured `expiresAt`.
+  - `"ledger_gap"`: Stellar ledger progression exceeding `maxLedgerGap`.
+  - `"reconciler"`: Internal finality state machine rule.
+- **`transitionReason`**: Human-readable, deterministic explanation of the decision rationale (e.g. `"Transaction confirmed on-chain in closed ledger"`, `"NOT_FOUND after 10 polls"`, `"Confirmation depth reached: current=1235, confirmed=1234, depth=1"`).
+- **Bounded Retention**: Evidence records are stored in a bounded FIFO ring buffer (`RECONCILER_MAX_EVIDENCE_ENTRIES`, default 500) to prevent unbounded memory growth while retaining full operational traceability.
+- **Privacy Invariants**: Evidence records never contain private keys, secret seeds, customer payloads, or transaction signing credentials.
 
 ---
 
@@ -82,8 +96,10 @@ All configuration is loaded from environment variables at startup in `src/lib/re
 | `RECONCILER_NOT_FOUND_THRESHOLD` | `10` | Number of consecutive 404 poll results from Horizon before transitioning a `PENDING` record to `NOT_FOUND`. |
 | `RECONCILER_BATCH_SIZE` | `50` | Maximum number of active records (`PENDING` or `CONFIRMING`) processed per tick. |
 | `STELLAR_HORIZON_URL` | `https://horizon-testnet.stellar.org` | Base URL of the Stellar Horizon server used to query transaction status and current ledger. |
+| `STELLAR_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Pinned Stellar network identity (passphrase) to reconcile against. If unset, derives from `STELLAR_NETWORK` (`"mainnet"` vs `"testnet"`). |
 | `RECONCILER_CONFIRMATION_DEPTH` | `1` | Number of closed ledgers required after first-seen before transitioning from `CONFIRMING` to `CONFIRMED`. |
 | `RECONCILER_CONCURRENCY_LIMIT` | `5` | Maximum number of concurrent Horizon/DB operations allowed during tick queue draining. |
+| `RECONCILER_MAX_EVIDENCE_ENTRIES` | `500` | Maximum number of payment finality evidence trail entries retained in bounded memory. |
 | `ADMIN_API_KEY` | — | Bearer token required for administrative endpoints (`/api/admin/reconciler/*`). |
 
 ---
@@ -173,6 +189,7 @@ import { registerTx } from "@/lib/reconciler";
 
 await registerTx({
   txHash: "68b49e...",
+  networkPassphrase: "Test SDF Network ; September 2015", // optional, defaults to configured network
   sourceType: "commerce_job", // or "token_purchase", "other"
   sourceId: job.id,
   ledgerSubmitted: 123456,   // optional, enables ledger gap expiry
@@ -180,7 +197,8 @@ await registerTx({
 });
 ```
 
-- **Idempotent**: Re-registering an existing `txHash` returns the existing record ID without duplicating rows or throwing.
+- **Idempotent**: Re-registering an existing `txHash` with the same `(sourceType, sourceId)` returns the existing record ID without duplicating rows or throwing.
+- **Conflicting Association Detection**: If an existing `txHash` is re-registered with an incompatible `sourceType` or `sourceId`, `registerTx()` records the conflict in `last_error` (`ASSOCIATION_CONFLICT: ...`), emits `reconciler_tx_association_conflict`, does not duplicate any row or financial effect, and throws `TxAssociationConflictError`. Likewise, before crediting a `CONFIRMED` commerce job, `applyRepair()` validates associations with `canCreditJob()` and rejects conflicting payment-to-job bindings.
 - **Fire-and-Forget Safe**: In routes such as `buy-token` and `jobs`, `registerTx` is called after the main database transaction commits, ensuring route responses are not blocked or failed if registration encounters an issue.
 
 ---
@@ -297,7 +315,60 @@ If Horizon cannot be contacted, the tick returns HTTP 503 along with the partial
 
 ---
 
-### 3. Public Payment Status Endpoint
+### 3. Payment Finality Evidence Trail (Admin Only)
+
+Inspect the bounded audit trail of payment finality transition decisions:
+
+```http
+GET /api/admin/reconciler/evidence
+Authorization: Bearer <ADMIN_API_KEY>
+```
+
+#### Query Parameters
+
+- `txHash` *(optional)*: Filter evidence entries for a specific transaction hash.
+- `status` *(optional)*: Filter by finality status (e.g. `CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`, `CONFIRMING`).
+- `source` *(optional)*: Filter by observation source (e.g. `horizon`, `wall_clock`, `ledger_gap`, `reconciler`).
+- `limit` *(optional)*: Number of entries to return (default: `50`, maximum: `200`).
+
+#### Example Request
+
+```bash
+curl -X GET "http://localhost:3000/api/admin/reconciler/evidence?limit=10" \
+  -H "Authorization: Bearer dev-admin-key"
+```
+
+#### Example Response (200 OK)
+
+```json
+{
+  "evidence": [
+    {
+      "txHash": "68b49e7978648174780650123512341234123412341234123412341234123412",
+      "txHashTruncated": "68b49e79...12341234",
+      "ledger": 1234567,
+      "observationSource": "horizon",
+      "transitionReason": "Transaction confirmed on-chain in closed ledger",
+      "fromStatus": "PENDING",
+      "toStatus": "CONFIRMING",
+      "decidedAt": "2026-10-17T05:10:00.000Z"
+    }
+  ],
+  "total": 1,
+  "limit": 10
+}
+```
+
+#### Status Codes
+- `200 OK`: Evidence trail returned.
+- `400 Bad Request`: Invalid query parameter (e.g., negative or non-integer limit).
+- `401 Unauthorized`: Missing `Authorization` header.
+- `403 Forbidden`: Invalid bearer token.
+- `500 Internal Server Error`: `ADMIN_API_KEY` not configured on the server.
+
+---
+
+### 4. Public Payment Status Endpoint
 
 Contributors and clients can inspect payment finality for a specific commerce job without an admin API key:
 
@@ -320,6 +391,7 @@ curl -X GET http://localhost:3000/api/talos/talos_123/jobs/job_456/payment-statu
   "finalityStatus": "CONFIRMED",
   "confirmedLedger": 1234567,
   "lastLedgerChecked": 1234568,
+  "observationAge": 1,
   "pollCount": 2,
   "lastError": null,
   "repairApplied": true,
@@ -353,6 +425,7 @@ Tracked transaction records are persisted in `tls_stellar_tx_records`:
 |---|---|---|
 | `id` | `text` (Primary Key) | CUID2 record identifier. |
 | `tx_hash` | `text` (Unique) | 64-character hex Stellar transaction hash. |
+| `network_passphrase` | `text` | Pinned Stellar network identity (passphrase) against which this payment is reconciled. |
 | `source_type` | `text` | Subsystem type (`"commerce_job"`, `"token_purchase"`, `"other"`). |
 | `source_id` | `text` | Target entity identifier (`jobId` or purchase `txHash`). |
 | `finality_status` | `text` | Current state (`PENDING`, `CONFIRMING`, `CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`). |
@@ -383,6 +456,22 @@ Indexes:
 
 ---
 
+## Dry-Run Payment Repair Plan
+
+Before applying reconciliation repairs, operators can inspect a read-only dry-run plan that lists every candidate transaction record, its proposed state transition, proposed downstream repair, and supporting Horizon/ledger observations (`src/lib/reconciler/plan.ts`).
+
+### Endpoints
+
+Both endpoints require `Authorization: Bearer <ADMIN_API_KEY>`:
+
+- **`GET /api/admin/reconciler/plan`**: Polls Horizon for active records and builds a `PaymentRepairPlan` with `planId`, `planHash`, `currentLedger`, and `items` (each containing `currentState`, `proposedState`, `proposedRepair`, `observations`, and `recordFingerprint`). Performs **zero** database writes. Returns `503` if Horizon is unreachable.
+- **`POST /api/admin/reconciler/plan`**: Executes **only** an explicitly selected, unchanged plan.
+  - Request body: `{ plan, planHash, selectedRecordIds }`
+  - Rejects with `400` (`INVALID_SELECTION`) if `selectedRecordIds` is empty or contains IDs outside the plan.
+  - Rejects with `409` (`PLAN_MODIFIED` or `RECORD_CHANGED`) if the plan payload was altered or any selected record changed in the database since dry-run generation, leaving all records untouched.
+
+---
+
 ## Local Verification
 
 Run the reconciler unit and route test suites:
@@ -390,6 +479,7 @@ Run the reconciler unit and route test suites:
 ```bash
 cd web
 pnpm vitest run tests/reconciler-state-machine.unit.test.ts
+pnpm vitest run tests/reconciler-repair-plan.unit.test.ts
 pnpm vitest run tests/reconciler-scheduler.unit.test.ts
 pnpm vitest run tests/reconciler-api-routes.unit.test.ts
 pnpm vitest run tests/reconciler-route-wiring.unit.test.ts

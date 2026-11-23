@@ -29,13 +29,32 @@ pending|leased → cancelled   (cooperative — see Cancellation below)
 - **dead_letter** — terminal, failure. `lastError` holds the last (truncated) error message.
 - **cancelled** — terminal, cooperative cancellation.
 
+## Immutable Attempt History
+
+Execution attempts are tracked in a dedicated `tls_job_attempts` table, completely separated from the mutable current job record in `tls_jobs`. Each attempt records:
+- `attemptNumber`: 1-based attempt sequence number.
+- `workerId`: Identifier of the worker claiming the lease.
+- `leaseId`: Unique lease token for the attempt.
+- `startedAt` / `completedAt`: Timestamps bounding attempt execution.
+- `durationMs`: Total execution time in milliseconds.
+- `terminalReason`: Terminal status of the attempt (`completed`, `retry_scheduled`, `dead_letter`, or `cancelled`).
+- `error`: Truncated error message if the attempt failed.
+
+Administrators can inspect attempt history via:
+- `GET /api/admin/jobs/:id` (includes `attemptsHistory` array)
+- `GET /api/admin/jobs/:id/attempts` (returns `{ jobId, attempts }`)
+- The Admin Jobs UI drawer at `/admin/jobs`.
+
 ## Leasing, heartbeats, and crash recovery
 
 `leaseBatch()` (`src/lib/jobs/store.ts`) atomically claims up to
 `JOBS_BATCH_SIZE` due jobs with `UPDATE ... WHERE id IN (SELECT ... FOR
 UPDATE SKIP LOCKED)`. A lease has an expiry (`JOBS_LEASE_DURATION_MS`); a
 running handler extends it by calling `ctx.heartbeat()`, which also reports
-back whether cancellation was requested.
+back whether cancellation was requested. Heartbeats arriving after the lease
+deadline has elapsed (`leaseExpiresAt <= now()`) are rejected (`ok: false`)
+without modifying the row, leaving expired ownership eligible for the normal
+reaper.
 
 If a worker process dies mid-job (crash, OOM, deploy), it simply stops
 heartbeating and the lease expires. There is no separate crash-recovery
@@ -80,9 +99,10 @@ immediately.
 Cancellation is cooperative, not preemptive — there's no way to kill a
 running handler mid-execution, so a leased job's `cancelRequested` flag is
 only observed the next time the handler calls `ctx.heartbeat()` (or checks
-`ctx.signal`). Write handlers that heartbeat periodically during any
-long-running loop. A `pending` job is cancelled immediately since nothing
-is running yet.
+`ctx.signal`). Similarly, if the lease deadline elapses before a heartbeat
+call, `ctx.heartbeat()` returns `ok: false` and signals the abort controller.
+Write handlers that heartbeat periodically during any long-running loop. A
+`pending` job is cancelled immediately since nothing is running yet.
 
 ## Idempotency
 
@@ -102,11 +122,15 @@ All read from the environment at process start (see `.env.example`):
 | `ADMIN_API_KEY` | — | Bearer token for `/api/admin/jobs/*`. Required to use those routes. |
 | `INTERNAL_JOBS_SECRET` | — | Shared secret for `/api/internal/jobs/drain`. Required to use it. |
 | `JOBS_LEASE_DURATION_MS` | `30000` | How long a lease is held before it's reapable. |
+| `JOBS_MAX_LEASE_EXTENSION_MS` | `3600000` | Maximum duration a single lease extension request may add or set. |
+| `JOBS_MAX_LEASE_HORIZON_MS` | `86400000` | Maximum absolute future horizon a lease may be extended to from `now`. |
 | `JOBS_HEARTBEAT_INTERVAL_MS` | `10000` | How often a running handler heartbeats. |
 | `JOBS_BATCH_SIZE` | `10` | Jobs claimed per `runOnce()` call. |
 | `JOBS_DEFAULT_MAX_ATTEMPTS` | `8` | Default ceiling for jobs that don't specify one. |
 | `JOBS_POLL_INTERVAL_MS` | `2000` | Continuous-worker poll interval when the queue is empty. |
 | `JOBS_SHUTDOWN_GRACE_MS` | `10000` | Grace period for in-flight jobs during graceful shutdown. |
+| `JOBS_MAX_RESULT_BYTES` | `65536` | Maximum UTF-8 JSON byte size of a persisted job `result` before replacement with a bounded diagnostic envelope. |
+| `JOBS_MAX_ERROR_BYTES` | `500` | Maximum UTF-8 byte size of a persisted `lastError` diagnostic message before truncation. |
 
 ## Running it
 
@@ -141,6 +165,7 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 - `GET /api/admin/jobs?status=&queue=&cursor=&limit=` — list, cursor-paginated by `createdAt` descending (same convention as the rest of the API — see `OBSERVABILITY.md`).
 - `GET /api/admin/jobs/:id` — full record, including `payload` and `result`, for debugging a stuck or dead-lettered job.
 - `POST /api/admin/jobs/:id/retry` — requeue a `dead_letter`/`cancelled` job (resets attempts, clears `lastError`). 409 if the job isn't in one of those states.
+- `POST /api/admin/jobs/bulk-retry` — dry-run bulk retry preview (`dryRun: true`, default) that filters candidate jobs, counts eligible vs. ineligible jobs with explicit reasons (`eligible`, `not_found`, `status_not_failed`, `cancelled_excluded`, `queue_mismatch`, `retry_class_mismatch`, `fatal_retry_class`), and returns each eligible job's `revision` (`updatedAt` ISO timestamp). Executing (`dryRun: false`) requires explicit `selections: [{ id, revision }]` and atomically verifies each job's revision is unchanged before requeuing (returning `409` if all requested jobs fail with `revision_mismatch`).
 - `POST /api/admin/jobs/:id/cancel` — cooperative cancel. 409 if the job is already in a terminal state.
 
 ## Observability

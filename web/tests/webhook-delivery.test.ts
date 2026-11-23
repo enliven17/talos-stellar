@@ -298,6 +298,117 @@ describe("Webhook Delivery Engine", () => {
       const result = await attemptDelivery("delivery_1", "worker_1");
       expect(result).toBeNull();
     });
+
+    it("bounds response-body capture to MAX_RESPONSE_BYTES and preserves status and timing when truncated", async () => {
+      process.env.WEBHOOK_DELIVERY_ENABLED = "true";
+      process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = WEBHOOK_SECRET_ENCRYPTION_KEY;
+
+      const { attemptDelivery, readBoundedResponseBody } = await import("@/lib/webhooks/delivery");
+      const { safeFetch } = await import("@/lib/security/ssrf");
+
+      const claimedDelivery = {
+        id: "del_bounded",
+        subscriptionId: "sub_1",
+        status: "pending",
+        attempts: 0,
+        maxAttempts: 3,
+        fencingToken: 1,
+        payloadHash: "hash123:test.event@record_1",
+      };
+
+      const mockSub = {
+        id: "sub_1",
+        talosId: "agent_1",
+        url: "https://example.com/webhook",
+        secretCiphertext: (await import("@/lib/webhooks/signing")).encryptSecret("whsec_test_secret_key_1234"),
+        eventTypes: ["test.event"],
+        active: true,
+        signatureVersion: 1,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      // Mock DB: first update returns claimed delivery
+      mockDb.update.mockReturnValueOnce(updateChain([claimedDelivery]));
+      // select returns subscription
+      mockDb.select.mockReturnValueOnce(selectChain([mockSub]));
+
+      // safeFetch returns a Response with a large body (20,000 bytes > 10,000 max bytes)
+      const largeText = "A".repeat(25_000);
+      const mockStream = new ReadableStream({
+        start(controller) {
+          const enc = new TextEncoder();
+          controller.enqueue(enc.encode(largeText.slice(0, 15_000)));
+          controller.enqueue(enc.encode(largeText.slice(15_000)));
+          controller.close();
+        },
+      });
+
+      const mockResponse = new Response(mockStream, {
+        status: 200,
+        statusText: "OK",
+        headers: { "Content-Type": "text/plain" },
+      });
+      vi.mocked(safeFetch).mockResolvedValueOnce(mockResponse);
+
+      let updatedFields: any = null;
+      mockDb.update.mockReturnValueOnce({
+        set: vi.fn((fields: any) => {
+          updatedFields = fields;
+          return {
+            where: vi.fn().mockResolvedValue([]),
+          };
+        }),
+      });
+
+      const res = await attemptDelivery("del_bounded", "worker_1");
+      expect(res).not.toBeNull();
+      expect(res?.status).toBe("delivered");
+      expect(res?.lastStatusCode).toBe(200);
+
+      expect(updatedFields).not.toBeNull();
+      expect(updatedFields.lastStatusCode).toBe(200);
+      expect(updatedFields.responseBody).toHaveLength(10_000 + 3); // 10,000 bytes + '...'
+      expect(updatedFields.responseBody.endsWith("...")).toBe(true);
+      expect(updatedFields.lastAttemptAt).toBeInstanceOf(Date);
+      expect(updatedFields.completedAt).toBeInstanceOf(Date);
+    });
+
+    it("readBoundedResponseBody captures exact bytes when below limit and preserves status", async () => {
+      const { readBoundedResponseBody } = await import("@/lib/webhooks/delivery");
+
+      const body = "hello world";
+      const resp = new Response(body, { status: 200 });
+      const captured = await readBoundedResponseBody(resp, 100);
+      expect(captured).toBe("hello world");
+    });
+
+    it("readBoundedResponseBody handles null/empty bodies gracefully", async () => {
+      const { readBoundedResponseBody } = await import("@/lib/webhooks/delivery");
+
+      const resp = new Response(null, { status: 204 });
+      const captured = await readBoundedResponseBody(resp, 100);
+      expect(captured).toBeNull();
+    });
+
+    it("readBoundedResponseBody truncates multi-chunk streams at the boundary", async () => {
+      const { readBoundedResponseBody } = await import("@/lib/webhooks/delivery");
+
+      let cancelled = false;
+      const stream = new ReadableStream({
+        pull(controller) {
+          controller.enqueue(new Uint8Array([65, 65, 65, 65, 65])); // 5 bytes 'AAAAA'
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+
+      const resp = new Response(stream, { status: 500 });
+      const captured = await readBoundedResponseBody(resp, 7);
+      expect(captured).toBe("AAAAAAA...");
+      expect(cancelled).toBe(true);
+    });
   });
 });
 
@@ -567,6 +678,7 @@ describe("Webhook Subscription API", () => {
         fencingToken: 1,
         status: "pending",
         subscriptionId: "sub_1",
+        attempts: 0,
       };
 
       process.env.WEBHOOK_DELIVERY_ENABLED = "true";
@@ -584,6 +696,7 @@ describe("Webhook Subscription API", () => {
       const body = await response.json();
       expect(body.fencingToken).toBe(1);
       expect(body.leasedBy).toBe("worker_1");
+      expect(body.attempts).toBe(0);
     });
 
     it("rejects claim on non-existent delivery", async () => {
@@ -604,6 +717,119 @@ describe("Webhook Subscription API", () => {
 
       const response = await POST(request, { params: Promise.resolve({ id: "nonexistent" }) });
       expect(response.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/webhooks/deliveries/:id/result", () => {
+    it("accepts valid result matching the delivery attempt", async () => {
+      const { POST } = await import("../src/app/api/webhooks/deliveries/[id]/result/route");
+
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "worker_1" }])) // resolveCallerTalos
+        .mockReturnValueOnce(
+          selectChain([
+            {
+              id: "delivery_1",
+              status: "pending",
+              attempts: 1,
+              maxAttempts: 5,
+              fencingToken: 2,
+            },
+          ]),
+        );
+
+      mockDb.update.mockReturnValue(updateChain([{ id: "delivery_1" }]));
+
+      const request = new NextRequest("http://localhost:3000/api/webhooks/deliveries/delivery_1/result", {
+        method: "POST",
+        headers: { Authorization: "Bearer tok_worker_1" },
+        body: JSON.stringify({
+          fencingToken: 2,
+          attempt: 1,
+          statusCode: 200,
+        }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: "delivery_1" }) });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.status).toBe("delivered");
+      expect(body.attempts).toBe(2);
+      expect(mockDb.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects stale attempt acknowledgement from older attempt and preserves lease/status", async () => {
+      const { POST } = await import("../src/app/api/webhooks/deliveries/[id]/result/route");
+
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "worker_1" }])) // resolveCallerTalos
+        .mockReturnValueOnce(
+          selectChain([
+            {
+              id: "delivery_1",
+              status: "failed",
+              attempts: 2,
+              maxAttempts: 5,
+              fencingToken: 3,
+            },
+          ]),
+        );
+
+      mockDb.update.mockReturnValue(updateChain([]));
+
+      const request = new NextRequest("http://localhost:3000/api/webhooks/deliveries/delivery_1/result", {
+        method: "POST",
+        headers: { Authorization: "Bearer tok_worker_1" },
+        body: JSON.stringify({
+          fencingToken: 3,
+          attempt: 1, // older attempt than current attempts: 2
+          statusCode: 500,
+          error: "Timeout error from stale attempt",
+        }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: "delivery_1" }) });
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body.error).toBe("Stale attempt acknowledgement");
+      expect(body.detail).toContain("Acknowledgement is for attempt 1, but delivery is currently at attempt 2");
+      // Verify no DB update occurred, preserving current attempt's lease and status
+      expect(mockDb.update).not.toHaveBeenCalled();
+    });
+
+    it("preserves backward compatibility when attempt is not provided", async () => {
+      const { POST } = await import("../src/app/api/webhooks/deliveries/[id]/result/route");
+
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "worker_1" }])) // resolveCallerTalos
+        .mockReturnValueOnce(
+          selectChain([
+            {
+              id: "delivery_1",
+              status: "pending",
+              attempts: 0,
+              maxAttempts: 5,
+              fencingToken: 1,
+            },
+          ]),
+        );
+
+      mockDb.update.mockReturnValue(updateChain([{ id: "delivery_1" }]));
+
+      const request = new NextRequest("http://localhost:3000/api/webhooks/deliveries/delivery_1/result", {
+        method: "POST",
+        headers: { Authorization: "Bearer tok_worker_1" },
+        body: JSON.stringify({
+          fencingToken: 1,
+          statusCode: 200,
+        }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: "delivery_1" }) });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.status).toBe("delivered");
+      expect(mockDb.update).toHaveBeenCalledTimes(1);
     });
   });
 });

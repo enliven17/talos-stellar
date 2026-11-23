@@ -10,7 +10,15 @@ export interface RunOnceOptions {
   batchSize?: number;
   workerId?: string;
   leaseDurationMs?: number;
+  maxLeaseExtensionMs?: number;
+  maxLeaseHorizonMs?: number;
   heartbeatIntervalMs?: number;
+  /**
+   * Maximum jobs any single queue may contribute to one drain batch.
+   * Default 0 (unlimited). When set, the batch is assembled by claiming at
+   * most this many jobs per queue in priority/runAt order.
+   */
+  fairBatchPerQueue?: number;
   /** Aborts in-flight handlers (e.g. from graceful shutdown). */
   signal?: AbortSignal;
   /**
@@ -39,6 +47,7 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
     deadLettered: 0,
     cancelled: 0,
     reaped: 0,
+    agedOut: 0,
   };
 
   // Recover jobs whose worker died mid-lease before claiming new work, so a
@@ -46,9 +55,13 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
   const reaped = await store.reapExpiredLeases();
   summary.reaped = reaped.requeued + reaped.deadLettered;
 
+  // Expire pending jobs that have waited past the queue-age deadline without
+  // ever being claimed. These never ran, so no retry attempt is consumed.
+  summary.agedOut = await store.expireAgedPendingJobs();
+
   if (queues.length === 0) return summary;
 
-  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs);
+  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs, opts.fairBatchPerQueue);
   summary.leased = batch.length;
   opts.onLeased?.(batch);
 
@@ -124,10 +137,21 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
       applyEffect,
       signal: controller.signal,
       heartbeat: runHeartbeat,
+      extendLease: runExtendLease,
     });
 
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+        });
+      }
       return;
     }
 
@@ -139,7 +163,18 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
     }
 
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+          error: err,
+        });
+      }
       return;
     }
 

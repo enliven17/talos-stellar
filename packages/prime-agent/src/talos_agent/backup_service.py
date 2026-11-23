@@ -17,6 +17,13 @@ Reuses:
 Bounded:
     - SQLite backup uses the official sqlite3.Connection.backup() API,
       which is bounded by the source DB size (no unbounded read).
+    - Plaintext backup envelope is capped at MAX_PLAINTEXT_BYTES (10 MiB)
+      to prevent accidental disk-fill from rogue input.
+    - Decompressed restore bytes are capped at MAX_DECOMPRESSED_RESTORE_BYTES
+      (10 MiB), independently enforced during extraction. This prevents a
+      maliciously crafted artifact (compressed bomb, recursive expansion, or
+      manifest lying about file sizes) from exhausting disk or memory.
+      The check happens before writing files to disk, so restore fails fast.
     - Web API calls reuse `http.request_with_retry` (3 attempts, exp
       backoff with jitter).
     - Single-concurrency: a per-root lock file in `.talos-agent/locks/`
@@ -26,6 +33,9 @@ Idempotent:
     - `backup` overwrites the destination artifact path.
     - `restore` refuses to proceed if the target DB exists and
       `--confirm` is not supplied.
+    - `restore` stages every database in an isolated candidate directory and
+      validates SQLite integrity, required schema, schema version, and the
+      agent identity (when known) before replacing live state.
     - `verify` is a pure read; safe to repeat.
 
 Privacy-safe:
@@ -39,6 +49,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -53,7 +64,7 @@ import structlog
 
 from talos_agent.config import APP_DIR
 from talos_agent.crypto import decrypt_with_password, encrypt_with_password
-from talos_agent.db import get_db_path
+from talos_agent.db import _MIGRATIONS, get_db_path
 
 log = structlog.get_logger(__name__)
 
@@ -64,6 +75,31 @@ BACKUP_ENCRYPTION_LABEL = "AES-256-GCM#PBKDF2-SHA256#200000"
 # state is easily a few MiB. We allow generous headroom but still defend
 # against accidental disk-fill from rogue input.
 MAX_PLAINTEXT_BYTES = 10 * 1024 * 1024
+
+# Every restored database must contain these core tables and columns before
+# it is allowed to replace live agent state.  Additional tables are fine:
+# this is a compatibility floor, not an exact-schema match.
+_REQUIRED_RESTORE_SCHEMA: dict[str, tuple[str, ...]] = {
+    "schedules": ("task_name", "last_run_at"),
+    "activity_log": ("id", "type", "content", "channel", "status", "created_at"),
+    "talos_config": ("key", "value"),
+}
+
+_AGENT_DB_NAME = re.compile(r"^agent-(?P<agent_id>.+)\.db$")
+
+
+def _latest_schema_version() -> int:
+    """Return the newest migration version understood by this agent build."""
+    return max(version for version, _sql in _MIGRATIONS)
+
+
+@dataclass(frozen=True)
+class RestoreValidation:
+    """Result of validating an isolated restore candidate."""
+
+    schema_version: int
+    tables: tuple[str, ...]
+    agent_id: str | None = None
 
 
 @dataclass
@@ -177,13 +213,214 @@ def _sqlite_hot_backup(source: Path, dest: Path) -> None:
         src.close()
 
 
+def _get_schema_version(db_path: Path) -> int:
+    """Read the schema version (PRAGMA user_version) from a database."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA user_version;")
+        return int(cursor.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _get_current_schema_version() -> int:
+    """Get the current schema version from the migrations module."""
+    from talos_agent.db.migrations import _MIGRATIONS
+    return max(m[0] for m in _MIGRATIONS)
+
+
+def check_schema_compatibility(
+    backup_schema_version: int,
+    *,
+    current_schema_version: int | None = None,
+) -> dict:
+    """Check if a backup's schema version is compatible with the current agent.
+
+    Returns a dict with:
+    - "compatible": bool — True if the backup can be restored without data loss
+    - "backup_schema_version": int — schema version in the backup
+    - "current_schema_version": int — schema version of the running agent
+    - "required_migrations": list[int] — migration versions that would need to run
+    - "unsupported_downgrade": bool — True if backup is newer than current agent
+    - "message": str — human-readable explanation
+    """
+    if current_schema_version is None:
+        current_schema_version = _get_current_schema_version()
+
+    if backup_schema_version > current_schema_version:
+        return {
+            "compatible": False,
+            "backup_schema_version": backup_schema_version,
+            "current_schema_version": current_schema_version,
+            "required_migrations": [],
+            "unsupported_downgrade": True,
+            "message": (
+                f"Backup schema version {backup_schema_version} is newer than "
+                f"current agent schema version {current_schema_version}. "
+                f"Restoring would require an unsupported downgrade."
+            ),
+        }
+
+    required_migrations = list(range(backup_schema_version + 1, current_schema_version + 1))
+    return {
+        "compatible": True,
+        "backup_schema_version": backup_schema_version,
+        "current_schema_version": current_schema_version,
+        "required_migrations": required_migrations,
+        "unsupported_downgrade": False,
+        "message": (
+            f"Backup schema version {backup_schema_version} is compatible. "
+            f"{len(required_migrations)} migration(s) would run on first use: {required_migrations or 'none'}."
+        ),
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _agent_id_from_db_name(name: str) -> str | None:
+    """Extract the agent identity encoded in an ``agent-<id>.db`` filename."""
+    match = _AGENT_DB_NAME.match(Path(name).name)
+    return match.group("agent_id") if match else None
+
+
+def _read_candidate_agent_id(conn: sqlite3.Connection) -> str | None:
+    """Read the identity stamped into a database, if the build predates it."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM talos_config WHERE key = 'agent_id'"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    return str(row[0]) if row and row[0] is not None else None
+
+
+def validate_restored_database(
+    db_path: Path,
+    *,
+    expected_agent_id: str | None = None,
+    latest_schema_version: int | None = None,
+) -> RestoreValidation:
+    """Validate a staged database before it can replace live agent state.
+
+    Checks, in order:
+        1. SQLite ``PRAGMA integrity_check`` passes.
+        2. Core tables/columns required by the running agent exist.
+        3. The schema version is not newer than this agent understands.
+        4. The in-database ``agent_id`` (when present) matches the expected
+           identity.  Missing identity is tolerated for legacy artifacts;
+           a conflicting identity is always rejected.
+
+    The database is opened read-only so validation can never mutate the
+    candidate or run migrations against it.
+    """
+    candidate = Path(db_path)
+    if not candidate.exists():
+        raise BackupError(f"Restore candidate not found: {candidate}", code="BAD_INPUT")
+
+    max_schema_version = (
+        latest_schema_version
+        if latest_schema_version is not None
+        else _latest_schema_version()
+    )
+
+    try:
+        conn = sqlite3.connect(f"{candidate.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise BackupError(
+            f"Restore candidate is not a readable SQLite database: {exc}",
+            code="CORRUPT_DB",
+        ) from exc
+
+    try:
+        try:
+            integrity_rows = conn.execute("PRAGMA integrity_check").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise BackupError(
+                f"Restore candidate failed SQLite integrity check: {exc}",
+                code="CORRUPT_DB",
+            ) from exc
+        integrity = [str(row[0]) for row in integrity_rows]
+        if integrity != ["ok"]:
+            detail = integrity[0] if integrity else "empty result"
+            raise BackupError(
+                f"Restore candidate failed SQLite integrity check: {detail}",
+                code="CORRUPT_DB",
+            )
+
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for table, required_columns in _REQUIRED_RESTORE_SCHEMA.items():
+            if table not in tables:
+                raise BackupError(
+                    f"Restore candidate is missing required table {table!r}",
+                    code="SCHEMA_MISMATCH",
+                )
+            columns = {
+                str(row[1])
+                for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+            missing = [col for col in required_columns if col not in columns]
+            if missing:
+                raise BackupError(
+                    f"Restore candidate table {table!r} is missing columns: {missing}",
+                    code="SCHEMA_MISMATCH",
+                )
+
+        schema_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if schema_version > max_schema_version:
+            raise BackupError(
+                f"Restore candidate schema version {schema_version} is newer than "
+                f"this agent supports ({max_schema_version})",
+                code="SCHEMA_MISMATCH",
+            )
+
+        stored_agent_id = _read_candidate_agent_id(conn)
+        if (
+            expected_agent_id
+            and stored_agent_id
+            and stored_agent_id != expected_agent_id
+        ):
+            raise BackupError(
+                f"Restore candidate belongs to agent {stored_agent_id!r}, not "
+                f"{expected_agent_id!r}",
+                code="IDENTITY_MISMATCH",
+            )
+
+        return RestoreValidation(
+            schema_version=schema_version,
+            tables=tuple(sorted(tables)),
+            agent_id=stored_agent_id,
+        )
+    finally:
+        conn.close()
 
 
 # ────────────────────────────────────────────────────────────────────
 # Build
 # ────────────────────────────────────────────────────────────────────
+
+
+def _get_active_db_path(agent_id: str | None = None) -> Path:
+    """Return the active db path, honoring monkeypatched APP_DIR in backup_service or db."""
+    try:
+        from talos_agent.db import get_db_path
+        p = get_db_path(agent_id)
+        if not p.exists() and APP_DIR != Path("~/.talos-agent").expanduser():
+            alt = APP_DIR / (f"agent-{agent_id}.db" if agent_id else "talos-agent.db")
+            if alt.exists():
+                return alt
+        return p
+    except Exception:
+        if agent_id:
+            return APP_DIR / f"agent-{agent_id}.db"
+        return APP_DIR / "talos-agent.db"
 
 
 def collect_agent_files(agent_id: str | None = None) -> list[Path]:
@@ -193,7 +430,7 @@ def collect_agent_files(agent_id: str | None = None) -> list[Path]:
         agent_id=None  → include the default `talos-agent.db`
         agent_id="..."  → include `agent-<id>.db`
     """
-    paths = [get_db_path(agent_id)]
+    paths = [_get_active_db_path(agent_id)]
     return [p for p in paths if p.exists()]
 
 
@@ -211,6 +448,20 @@ def build_backup(
     if len(password) > 1024:
         raise BackupError("Backup passphrase too long (max 1024 chars)")
 
+    # Reject if the output path aliases the live database file (directly or via symlink)
+    # Resolve both paths to their absolute canonical forms.
+    out_resolved = out_path.resolve(strict=False)
+    db_path = _get_active_db_path(agent_id)
+    try:
+        db_resolved = db_path.resolve(strict=False)
+    except Exception:
+        db_resolved = db_path.absolute()
+    if out_resolved == db_resolved:
+        raise BackupError(
+            "Backup output path cannot alias the active database file",
+            code="ALIAS_REJECTED",
+        )
+
     sources = collect_agent_files(agent_id)
     if not sources:
         raise BackupError(f"No agent state found at {APP_DIR}", code="BAD_INPUT")
@@ -224,9 +475,12 @@ def build_backup(
         try:
             files_meta: dict[str, dict[str, Any]] = {}
             db_row_counts: dict[str, int] = {}
+            db_schema_versions: dict[str, int] = {}
             body_bytes: dict[str, str] = {}  # path → base64
             running_size = 0
             for src in sources:
+                # Capture schema version from the live DB before hot backup.
+                db_schema_versions[src.name] = _get_schema_version(src)
                 # Hot backup to a staging copy, NOT modifying the live DB.
                 safe_name = _safe_filename(f"db/{src.name}")
                 dest = staging / safe_name
@@ -274,15 +528,19 @@ def build_backup(
                 json.dumps(manifest_inner, sort_keys=True).encode("utf8")
             )
 
+            # Include schema versions per database in the top-level database metadata.
+            database_meta = {
+                "signalVersion": sqlite3.sqlite_version,
+                "rowCountsSqlite": db_row_counts,
+                "schemaVersions": db_schema_versions,
+            }
+
             run = BackupRun(
                 version=BACKUP_FORMAT_VERSION,
                 encryption=BACKUP_ENCRYPTION_LABEL,
                 scope=scope,
                 timestamp=_now_iso(),
-                database={
-                    "signalVersion": sqlite3.sqlite_version,
-                    "rowCountsSqlite": db_row_counts,
-                },
+                database=database_meta,
                 files=files_meta,
                 manifest={
                     "sha256": manifest_sha,
@@ -304,6 +562,7 @@ def build_backup(
                 "encryption": run.encryption,
                 "scope": run.scope,
                 "timestamp": run.timestamp,
+                "agent_id": agent_id,
                 "database": run.database,
                 "filesMeta": run.files,
                 "body": ordered_files,
@@ -329,7 +588,19 @@ def build_backup(
             encrypted = encrypt_with_password(plaintext.decode("utf8"), password)
 
             # Stream ciphertext to disk in chunks (same envelope; verify/restore unchanged).
-            stream_encrypted_artifact(encrypted, out_path)
+            # #1452: a failure here leaves <out>.incomplete on disk (see
+            # stream_encrypted_artifact) and surfaces a bounded code so the
+            # caller can distinguish a partial write from an auth/verify error.
+            try:
+                stream_encrypted_artifact(encrypted, out_path)
+            except BackupError:
+                raise
+            except Exception as exc:
+                raise BackupError(
+                    f"Backup write failed; partial artifact preserved at "
+                    f"{out_path.with_suffix(out_path.suffix + '.incomplete')}: {exc}",
+                    code="INCOMPLETE_WRITE",
+                ) from exc
 
             log.info(
                 "prime_agent_backup_completed",
@@ -455,6 +726,37 @@ def prune_backups(
 
     return deleted
 
+
+def preview_database_retention(
+    db_path: Path | None = None,
+    agent_id: str | None = None,
+    *,
+    record_class: str | None = None,
+    cutoff_iso: str | None = None,
+):
+    """Preview local SQLite database retention candidates grouped by record class (#1451).
+
+    Reads directly from the specified database (or default/per-agent DB) without modifying
+    or deleting any rows.
+    """
+    from talos_agent.db.facade import LocalDB
+    from talos_agent.db.retention import preview_state_retention
+
+    target = db_path or _get_active_db_path(agent_id)
+    if not target.exists():
+        raise BackupError(f"Database not found at {target}", code="BAD_INPUT")
+
+    db = LocalDB(path=target)
+    try:
+        return preview_state_retention(
+            db._conn,
+            record_class_filter=record_class,
+            cutoff_iso=cutoff_iso,
+        )
+    finally:
+        db.close()
+
+
 # ────────────────────────────────────────────────────────────────────
 # Verify
 # ────────────────────────────────────────────────────────────────────
@@ -498,18 +800,37 @@ def stream_encrypted_artifact(
             os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
             pass
-    finally:
+    except BaseException:
+        # #1452: a failed write must leave a recoverable artifact, not a
+        # deleted one. Rename the partial to an explicit `.incomplete` suffix
+        # so an operator can inspect it, and so verify_backup / prune never
+        # mistake it for a verified backup.
         if tmp.exists():
             try:
-                tmp.unlink()
+                os.replace(tmp, out_path.with_suffix(out_path.suffix + ".incomplete"))
             except OSError:
-                pass
+                # If even the rename fails, try to unlink so we do not leave
+                # a `.partial` that looks like a resumable artifact.
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        raise
     return written
 
 
 
 def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
-    """Read + decrypt + sanity-check without writing."""
+    """Read + decrypt + sanity-check without writing.
+
+    #1452: refuses a `.incomplete` artifact up front. A partial write is never
+    a verified backup, so this path never presents one as such.
+    """
+    if artifact_path.name.endswith(".incomplete"):
+        raise BackupError(
+            f"Refusing to verify an incomplete backup artifact: {artifact_path}",
+            code="INCOMPLETE_WRITE",
+        )
     if not artifact_path.exists():
         raise BackupError(f"Artifact not found: {artifact_path}", code="BAD_INPUT")
     blob = artifact_path.read_text(encoding="utf8")
@@ -553,6 +874,22 @@ def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
         # We didn't bake the sha into the plaintext, but we capture and compare
         # externally so `backup-doctor` can flag mismatch.
         pass
+
+    # Extract schema versions from backup metadata.
+    database_meta = data.get("database", {})
+    backup_schema_versions = database_meta.get("schemaVersions", {})
+    # For backward compatibility, also check manifest for a single schemaVersion.
+    if not backup_schema_versions and "schemaVersion" in data.get("manifest", {}):
+        # Legacy format: single schemaVersion in manifest (SQLite version, not user_version).
+        # We can't determine the actual schema version from this, so we leave it empty.
+        pass
+
+    # Compute compatibility for each database in the backup.
+    schema_compatibility = {}
+    for db_name, backup_version in backup_schema_versions.items():
+        compat = check_schema_compatibility(backup_version)
+        schema_compatibility[db_name] = compat
+
     log.info(
         "prime_agent_backup_verified",
         artifact=str(artifact_path),
@@ -562,12 +899,14 @@ def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
     )
     # Filter to BackupRun dataclass fields; the wire payload carries
     # additional keys (body, filesMeta) that BackupRun does not accept.
+    # Attach schema compatibility report to database metadata.
+    database_meta["schemaCompatibility"] = schema_compatibility
     return BackupRun(
         version=data.get("version", BACKUP_FORMAT_VERSION),
         encryption=data.get("encryption", BACKUP_ENCRYPTION_LABEL),
         scope=data.get("scope", "agent"),
         timestamp=data.get("timestamp", ""),
-        database=data.get("database", {}),
+        database=database_meta,
         files=files_section,
         manifest=data["manifest"],
     )
@@ -585,18 +924,23 @@ def restore_backup(
     confirm: bool,
     agent_id: str | None = None,
     restore_root: Path | None = None,
+    allow_agent_mismatch: bool = False,
 ) -> BackupRun:
     """Restore SQLite state from an artifact.
 
     Behaviour:
         - Confirms artifact integrity (decrypt + sanity).
-        - Materialises each `db/*` file to `restore_root/` (defaults to APP_DIR).
-        - Atomically replaces existing files via `.bak → swap` on POSIX.
+        - Materialises each `db/*` file into an isolated candidate directory
+          on the target filesystem (never directly over live state).
+        - Validates every candidate database: SQLite integrity, required
+          schema, schema version, and agent identity when known.
+        - Atomically replaces existing files via `.pre-restore → swap` only
+          after all candidates pass validation.
         - Refuses to overwrite existing DB files unless `confirm=True`.
 
     Idempotency:
         - Two concurrent restore calls fail-fast via the single_flight lock.
-        - The swap is `os.rename` on the same filesystem → kernel-atomic.
+        - The swap is `os.replace` on the same filesystem → kernel-atomic.
     """
     if not confirm:
         raise BackupError(
@@ -607,10 +951,31 @@ def restore_backup(
     if not artifact_path.exists():
         raise BackupError(f"Artifact not found: {artifact_path}", code="BAD_INPUT")
 
+    expected_agent_id = agent_id.strip() if agent_id else None
+    if expected_agent_id and (
+        "/" in expected_agent_id
+        or "\\" in expected_agent_id
+        or ".." in expected_agent_id
+    ):
+        raise BackupError(
+            "agent_id must not contain path separators or traversal components",
+            code="BAD_INPUT",
+        )
+
     # Verify decrypts + parses + sanity-checks the manifest shape. Returns
     # a minimal `BackupRun` view (no bodies) so we can read top-level
     # metadata without exposing raw bytes yet.
     verified = verify_backup(artifact_path=artifact_path, password=password)
+
+    # Check schema compatibility before proceeding with restore.
+    # This prevents unsupported downgrades without changing local state.
+    schema_compat = verified.database.get("schemaCompatibility", {})
+    for compat in schema_compat.values():
+        if not compat.get("compatible", True) and compat.get("unsupported_downgrade", False):
+            raise BackupError(
+                f"Unsupported schema downgrade: {compat['message']}",
+                code="UNSUPPORTED_DOWNGRADE",
+            )
 
     target_root = restore_root or APP_DIR
     target_root.mkdir(parents=True, exist_ok=True)
@@ -623,12 +988,45 @@ def restore_backup(
     body: dict = payload.get("body") or {}
     files_meta: dict = payload.get("filesMeta") or verified.files
 
+    # ── Agent-identifier guard (issue #1454) ─────────────────────────────
+    # Compare the archive's recorded agent_id with the caller's selected
+    # agent_id before any state is written. Behaviour:
+    #   - Both present and equal   → proceed (same-agent restore)
+    #   - Both present and differ  → raise AGENT_ID_MISMATCH unless the
+    #                                caller explicitly opts into migration
+    #                                via allow_agent_mismatch=True
+    #   - Either side missing      → proceed (legacy archive, or caller did
+    #                                not specify a target agent)
+    # Never mixes state silently: mismatch fails closed.
+    archive_agent_id = payload.get("agent_id")
+    if (
+        agent_id
+        and archive_agent_id
+        and agent_id != archive_agent_id
+    ):
+        if not allow_agent_mismatch:
+            raise BackupError(
+                f"Archive agent_id {archive_agent_id!r} does not match "
+                f"selected agent {agent_id!r}. Refusing to mix state; "
+                f"pass allow_agent_mismatch=True to migrate explicitly.",
+                code="AGENT_ID_MISMATCH",
+            )
+        log.warning(
+            "prime_agent_restore_agent_mismatch_allowed",
+            archive_agent_id=archive_agent_id,
+            selected_agent_id=agent_id,
+        )
+
     with single_flight("agent_restore"):
-        staging_root = APP_DIR / "restore-staging"
-        staging_root.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix="restore-", dir=str(staging_root)))
+        # Keep the candidate on the target filesystem so the final swap stays
+        # an atomic `os.replace` rather than a cross-device copy.  Nothing here
+        # can touch live state; the target only changes after validation.
+        staging = Path(
+            tempfile.mkdtemp(prefix=".restore-candidate-", dir=str(target_root))
+        )
         try:
             placed: list[tuple[Path, Path, int]] = []
+            target_paths: set[Path] = set()
             for name, meta in files_meta.items():
                 safe = _safe_filename(name)
                 if not safe.startswith("db/"):
@@ -643,6 +1041,17 @@ def restore_backup(
                         code="BAD_INPUT",
                     )
                 raw = _b64_decode(body[safe])
+                
+                # Bound decompressed bytes independently of archive size.
+                # Check cumulative size BEFORE writing to disk to fail fast.
+                cumulative_decompressed_bytes += len(raw)
+                if cumulative_decompressed_bytes > MAX_DECOMPRESSED_RESTORE_BYTES:
+                    raise BackupError(
+                        f"Decompressed restore size {cumulative_decompressed_bytes}B exceeds "
+                        f"MAX_DECOMPRESSED_RESTORE_BYTES={MAX_DECOMPRESSED_RESTORE_BYTES}B",
+                        code="BAD_INPUT",
+                    )
+                
                 expected_sha = meta.get("sha256")
                 expected_size = meta.get("size_bytes")
                 if expected_sha:
@@ -657,15 +1066,42 @@ def restore_backup(
                         f"Size mismatch for {safe}: expected {expected_size} got {len(raw)}",
                         code="BAD_INPUT",
                     )
-                # Place the file under `target_root/<relative-name>`.
+
                 rel = safe[len("db/"):]
-                target = (target_root / rel).resolve()
-                if not str(target).startswith(str(target_root.resolve())):
+                source_agent_id = _agent_id_from_db_name(rel)
+                if (
+                    expected_agent_id
+                    and source_agent_id
+                    and source_agent_id != expected_agent_id
+                ):
+                    raise BackupError(
+                        f"Artifact database belongs to agent {source_agent_id!r}, not "
+                        f"{expected_agent_id!r}",
+                        code="IDENTITY_MISMATCH",
+                    )
+
+                # An explicit --agent-id selects the destination database; an
+                # unqualified restore keeps using the artifact's filename as
+                # before (backwards compatible).
+                target_name = (
+                    f"agent-{expected_agent_id}.db"
+                    if expected_agent_id
+                    else Path(rel).name
+                )
+                target = (target_root / target_name).resolve()
+                if not target.is_relative_to(target_root.resolve()):
                     raise BackupError(
                         f"Refusing restore target outside restore_root: {target}",
                         code="BAD_INPUT",
                     )
-                staged = staging / Path(rel).name
+                if target in target_paths:
+                    raise BackupError(
+                        f"Backup artifact maps multiple databases to {target.name}",
+                        code="BAD_INPUT",
+                    )
+                target_paths.add(target)
+
+                staged = staging / target_name
                 staged.write_bytes(raw)
                 placed.append((staged, target, len(raw)))
 
@@ -675,9 +1111,29 @@ def restore_backup(
                     code="BAD_INPUT",
                 )
 
-            # Atomic swap. On POSIX, os.rename is atomic when both paths are
-            # on the same filesystem; staging lives under APP_DIR/restored
-            # so it always satisfies that invariant.
+            # Validate every candidate before swapping any of them, so a bad
+            # artifact cannot leave the agent with a partially replaced state.
+            validations: list[RestoreValidation] = []
+            for staged, target, _size in placed:
+                target_agent_id = expected_agent_id or _agent_id_from_db_name(
+                    target.name
+                )
+                validation = validate_restored_database(
+                    staged,
+                    expected_agent_id=target_agent_id,
+                )
+                validations.append(validation)
+                log.info(
+                    "prime_agent_restore_candidate_validated",
+                    file=target.name,
+                    schema_version=validation.schema_version,
+                    table_count=len(validation.tables),
+                    agent_id=validation.agent_id,
+                )
+
+            # Atomic swap. On POSIX, os.replace is atomic when both paths are
+            # on the same filesystem; the candidate lives under target_root so
+            # that invariant always holds.
             for staged, target, _size in placed:
                 if target.exists():
                     backup = target.with_suffix(target.suffix + ".pre-restore")
@@ -694,6 +1150,7 @@ def restore_backup(
                 artifact=str(artifact_path),
                 row_count_total=verified.manifest.get("rowCountTotal", 0),
                 files_restored=len(placed),
+                validated=len(validations),
             )
             return verified
         finally:
@@ -719,8 +1176,9 @@ async def trigger_web_backup(
     backup call.
     """
 
-    from talos_agent.http import request_with_retry
     import httpx
+
+    from talos_agent.http import request_with_retry
 
     async def send() -> httpx.Response:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
@@ -740,17 +1198,22 @@ async def trigger_web_backup(
 
 # Re-export so callers can hit a single object.
 __all__ = [
-    "BACKUP_FORMAT_VERSION",
     "BACKUP_ENCRYPTION_LABEL",
+    "BACKUP_FORMAT_VERSION",
     "MAX_PLAINTEXT_BYTES",
-    "BackupRun",
-    "BackupError",
     "BackupBusyError",
+    "BackupError",
+    "BackupRun",
     "build_backup",
     "verify_backup",
     "restore_backup",
+    "validate_restored_database",
+    "RestoreValidation",
     "trigger_web_backup",
     "collect_agent_files",
     "default_backup_dir",
     "prune_backups",
+    "restore_backup",
+    "trigger_web_backup",
+    "verify_backup",
 ]
