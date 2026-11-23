@@ -741,11 +741,13 @@ The SDK surfaces typed errors across its HTTP transport, pagination, idempotency
 
 Every HTTP and network error inherits from `TalosAPIError`, ensuring full backward compatibility with generic catch blocks (`error instanceof TalosAPIError`) while allowing granular narrowing on specific failure modes.
 
-When iterating with `JobTracker`, use `pause()` and `resume()` to apply
-consumer backpressure. Queued events are bounded by `queueMaxSize` (default
-`1000`). Overflow defaults to `drop-oldest`; `drop-newest` rejects incoming
-events, and `error` aborts tracking. `queuedEventCount` and
-`droppedEventCount` expose the current queue state.
+Public event payloads are additive within supported versions. The SDK accepts
+payload version `1` and ignores unknown additive fields. A payload with a
+higher numeric version is rejected with `UnsupportedEventPayloadVersionError`,
+which exposes `version` and `maxSupportedVersion`. Use
+`validateEventPayloadVersion(payload)` or configure
+`maxSupportedEventPayloadVersion` on event streams and job trackers when
+consuming a compatible future payload version.
 
 ### Error classes reference
 
