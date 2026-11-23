@@ -15,6 +15,7 @@
 //! | Shared types | [`TimelockConfig`], [`ProposalStatus`] |
 //! | Timelock events | [`emit_timelock_scheduled`], [`emit_timelock_executed`], [`emit_timelock_cancelled`], [`emit_timelock_config_changed`] |
 //! | Timelock validation | [`validate_timelock_config`], [`validate_delay`], [`validate_executable`] |
+//! | Action receipts | [`canonical_action_digest`], [`ExecutionReceipt`], [`emit_execution_receipt`] |
 //! | Guardian events | [`emit_guardian_added`], [`emit_guardian_removed`] |
 //! | Guardian helpers | [`add_guardian`], [`remove_guardian`], [`is_guardian`], [`list_guardians`] |
 //! | Pause events | [`emit_pause_set`], [`emit_pause_cleared`] |
@@ -40,8 +41,49 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Vec};
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, Env, IntoVal, String, Val, Vec};
 
+/// Immutable record written after a proposal action executes successfully.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionReceipt {
+    /// SHA-256 digest of the domain-separated canonical action XDR.
+    pub action_digest: BytesN<32>,
+    /// Ledger timestamp at which the action executed.
+    pub executed_at: u64,
+}
+
+/// Hash a contract action's canonical Soroban ScVal XDR with a domain prefix.
+///
+/// The namespace prevents identical XDR values in different contract families
+/// from being treated as the same approved action.
+pub fn canonical_action_digest<T>(env: &Env, namespace: &str, action: &T) -> BytesN<32>
+where
+    T: Clone + IntoVal<Env, Val>,
+{
+    let mut payload = Bytes::from_slice(env, namespace.as_bytes());
+    payload.append(&action.clone().to_xdr(env));
+    env.crypto().sha256(&payload).to_bytes()
+}
+
+/// Emit an additive receipt event while preserving the legacy `tl_exec` shape.
+pub fn emit_execution_receipt(
+    env: &Env,
+    namespace: &str,
+    proposal_id: u64,
+    receipt: &ExecutionReceipt,
+) {
+    let topics = (symbol_short!("act_rcpt"), proposal_id);
+    env.events().publish(
+        topics,
+        (
+            String::from_str(env, namespace),
+            receipt.action_digest.clone(),
+            receipt.executed_at,
+        ),
+    );
+}
 // ── Shared constants ──────────────────────────────────────────────────
 
 /// Default grace period (7 days in seconds) applied when no timelock config
@@ -529,5 +571,41 @@ mod tests {
         assert_ne!(ProposalStatus::Scheduled, ProposalStatus::Executed);
         assert_ne!(ProposalStatus::Scheduled, ProposalStatus::Cancelled);
         assert_ne!(ProposalStatus::Executed, ProposalStatus::Cancelled);
+    }
+}
+
+#[cfg(test)]
+mod action_digest_tests {
+    use super::canonical_action_digest;
+    use soroban_sdk::{contracttype, Env};
+
+    #[contracttype]
+    #[derive(Clone)]
+    enum FixtureAction {
+        SetFee(u32),
+    }
+
+    #[test]
+    fn canonical_digest_is_stable_for_the_same_action() {
+        let env = Env::default();
+        let action = FixtureAction::SetFee(125);
+        let first = canonical_action_digest(&env, "TalosRegistry", &action);
+        let second = canonical_action_digest(&env, "TalosRegistry", &action);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn canonical_digest_binds_namespace_and_payload() {
+        let env = Env::default();
+        let action = FixtureAction::SetFee(125);
+        let changed_action = FixtureAction::SetFee(126);
+        assert_ne!(
+            canonical_action_digest(&env, "TalosRegistry", &action),
+            canonical_action_digest(&env, "TalosRegistry", &changed_action),
+        );
+        assert_ne!(
+            canonical_action_digest(&env, "TalosRegistry", &action),
+            canonical_action_digest(&env, "TalosNameService", &action),
+        );
     }
 }

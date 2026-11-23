@@ -214,7 +214,7 @@ class TestRestoreDryRunRegression:
 class TestCheckpointCLIDryRun:
     def test_cli_dry_run_json(self, tmp_path: Path, valid_checkpoint_file: Path):
         runner = CliRunner()
-        with patch("talos_agent.db.APP_DIR", tmp_path):
+        with patch("talos_agent.db.migrations.APP_DIR", tmp_path):
             # Seed an active DB under APP_DIR so diff is non-empty
             from talos_agent.db import LocalDB as LDB
             from talos_agent.db import get_db_path
