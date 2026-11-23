@@ -1,8 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
+  MAX_CURSOR_LEN,
+  MAX_TALOS_ID_LEN,
   escapeIlikePattern,
   parseAuditLogFilters,
   statusClassRange,
+  validateAuditLogFilters,
 } from "@/lib/audit-log/filters";
 
 describe("escapeIlikePattern", () => {
@@ -82,7 +85,25 @@ describe("parseAuditLogFilters", () => {
     expect(parseAuditLogFilters(new URLSearchParams({ limit: "1.5" })).ok).toBe(false);
   });
 
-  it("rejects a malformed cursor", () => {
+  it("rejects a malformed or oversized cursor", () => {
     expect(parseAuditLogFilters(new URLSearchParams({ cursor: "not-a-date" })).ok).toBe(false);
+    const oversized = parseAuditLogFilters(
+      new URLSearchParams({ cursor: "2026-01-01T00:00:00.000Z".padEnd(MAX_CURSOR_LEN + 1, "0") }),
+    );
+    expect(oversized.ok).toBe(false);
+    if (!oversized.ok) {
+      expect(oversized.error).toBe(`cursor must be at most ${MAX_CURSOR_LEN} characters`);
+    }
+  });
+});
+
+describe("validateAuditLogFilters", () => {
+  it("validates actor, action, and cursor bounds directly", () => {
+    expect(validateAuditLogFilters({ talosId: "a".repeat(MAX_TALOS_ID_LEN) }).ok).toBe(true);
+    expect(validateAuditLogFilters({ talosId: "a".repeat(MAX_TALOS_ID_LEN + 1) }).ok).toBe(false);
+    expect(validateAuditLogFilters({ method: "POST" }).ok).toBe(true);
+    expect(validateAuditLogFilters({ method: "INVALID" as never }).ok).toBe(false);
+    expect(validateAuditLogFilters({ cursor: "2026-01-01T00:00:00.000Z" }).ok).toBe(true);
+    expect(validateAuditLogFilters({ cursor: "x".repeat(MAX_CURSOR_LEN + 1) }).ok).toBe(false);
   });
 });

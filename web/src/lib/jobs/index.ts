@@ -8,16 +8,23 @@
  *
  * See web/JOBS.md for configuration, operational signals, and rollback.
  */
-export { enqueue, getJob, listJobs, release, requestCancel, requeue } from "./store";
+export { enqueue, getJob, getJobAttempts, listJobs, recordAttempt, release, requestCancel, requeue } from "./store";
 export { registerHandler } from "./registry";
 export { runOnce } from "./runner";
+export type { RunOnceOptions } from "./runner";
 export { jobsConfig, JOBS_ENABLED } from "./config";
+export { boundError, boundResult, truncateError, truncateResult } from "./metrics";
 export type {
+  BoundedResultDiagnostic,
+  BoundErrorOutcome,
+  BoundResultOutcome,
   EnqueueOptions,
+  JobAttemptRecord,
   JobContext,
   JobHandler,
   JobRecord,
   JobStatus,
+  LeaseExtensionRejectionReason,
   RetryClass,
   RunOnceSummary,
 } from "./types";

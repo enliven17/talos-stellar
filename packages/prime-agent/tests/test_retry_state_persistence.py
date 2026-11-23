@@ -240,17 +240,36 @@ def test_durable_backoff_max_backoff_cap(tmp_path: Path):
 
 
 def test_durable_backoff_jitter_preserved(tmp_path: Path):
-    """With jitter enabled, delay is stable and stays within the configured band."""
+    """With jitter enabled, delay is stable and never precedes nominal eligibility."""
     db = _fresh_db(tmp_path)
     bo = DurableBackoff(
         "polling", db=db, base_delay=10.0, initial_backoff=100.0, jitter=0.2,
     )
-    bo.failure()  # fail_count=1 → delay ≈ 100 ±20%
+    bo.failure()  # fail_count=1 → delay is 100 to 120 seconds
 
     delays = [bo.next_delay() for _ in range(50)]
     for d in delays:
-        assert 80.0 <= d <= 120.0, f"Delay {d} outside jitter range"
+        assert 100.0 <= d <= 120.0, f"Delay {d} outside jitter range"
     assert len(set(delays)) == 1
+    db.close()
+
+
+def test_durable_backoff_clamps_minimum_jitter_sample(tmp_path: Path, monkeypatch):
+    class ZeroDigest:
+        def digest(self) -> bytes:
+            return b"\x00" * 8
+
+    monkeypatch.setattr(
+        "talos_agent.scheduler.backoff.hashlib.blake2b",
+        lambda *_args, **_kwargs: ZeroDigest(),
+    )
+    db = _fresh_db(tmp_path)
+    backoff = DurableBackoff(
+        "minimum_jitter", db, base_delay=5, initial_backoff=100, jitter=0.2
+    )
+    backoff.failure()
+
+    assert backoff.next_delay() == 100
     db.close()
 
 
@@ -311,7 +330,7 @@ def test_durable_backoff_accepts_full_jitter_boundary(tmp_path: Path):
     )
     backoff.failure()
 
-    assert 0.1 <= backoff.next_delay() <= 200
+    assert 100 <= backoff.next_delay() <= 200
     db.close()
 
 
