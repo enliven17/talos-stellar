@@ -269,6 +269,8 @@ async def polling_task(
         db=db,
         base_delay=settings.polling_interval,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
@@ -334,16 +336,10 @@ async def polling_task(
             raise
         except Exception as e:
             console.print(f"[dim red]Polling error: {e}[/dim red]")
-            if shutdown_event.is_set():
-                log.info("polling_attempt_interrupted_by_shutdown")
-            else:
-                backoff.success()
-            except Exception as e:
-                console.print(f"[dim red]Polling error: {e}[/dim red]")
-                backoff.failure()
-                if backoff.terminal:
-                    logger.warning("polling_task: reached max_attempts — stopping task")
-                    break
+            backoff.failure(e)
+            if backoff.terminal:
+                logger.warning("polling_task: reached max_attempts — stopping task")
+                break
 
         try:
             await asyncio.wait_for(
@@ -372,6 +368,8 @@ async def heartbeat_task(
         db=db,
         base_delay=settings.heartbeat_interval,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
@@ -384,13 +382,10 @@ async def heartbeat_task(
             raise
         except Exception as e:
             logger.debug(f"Heartbeat error: {e}")
-            if shutdown_event.is_set():
-                log.info("heartbeat_attempt_interrupted_by_shutdown")
-            else:
-                backoff.failure()
-                if backoff.terminal:
-                    logger.warning("heartbeat_task: reached max_attempts — stopping task")
-                    break
+            backoff.failure(e)
+            if backoff.terminal:
+                logger.warning("heartbeat_task: reached max_attempts — stopping task")
+                break
 
         try:
             await asyncio.wait_for(
@@ -422,6 +417,8 @@ async def job_heartbeat_task(
         db=db,
         base_delay=settings.job_heartbeat_interval,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while True:
@@ -441,10 +438,7 @@ async def job_heartbeat_task(
             raise
         except Exception as e:
             logger.debug("Job heartbeat error: %s", e)
-            if shutdown_event.is_set():
-                log.info("job_heartbeat_attempt_interrupted_by_shutdown")
-            else:
-                backoff.failure()
+            backoff.failure(e)
 
         if shutdown_drain_complete.is_set():
             break
@@ -483,6 +477,8 @@ async def activity_flush_task(
         db=db,
         base_delay=ACTIVITY_FLUSH_INTERVAL_SECONDS,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
@@ -504,11 +500,9 @@ async def activity_flush_task(
             raise
         except Exception as e:
             logger.debug(f"Activity flush error: {e}")
-            if shutdown_event.is_set():
-                log.info("activity_flush_attempt_interrupted_by_shutdown")
-            else:
-        async with _task_slot(task_slots, shutdown_event) as has_slot:
-            if not has_slot:
+            backoff.failure(e)
+            if backoff.terminal:
+                logger.warning("activity_flush_task: reached max_attempts — stopping task")
                 break
             try:
                 with _traced_task_run("activity_flush", talos_config):
@@ -894,6 +888,8 @@ async def job_effect_dispatch_task(
         db=db,
         base_delay=settings.talos_job_effect_dispatch_interval,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
@@ -910,32 +906,9 @@ async def job_effect_dispatch_task(
                     dead=result["dead"],
                 )
             backoff.success()
-        except asyncio.CancelledError:
-            # Cancellation is not a failed attempt — never consume retry budget.
-            raise
-        except Exception:
-            if shutdown_event.is_set():
-                log.info("job_effect_dispatch_interrupted_by_shutdown")
-            else:
-        async with _task_slot(task_slots, shutdown_event) as has_slot:
-            if not has_slot:
-                break
-            try:
-                result = await job_effect_dispatcher.dispatch_once()
-                if result["claimed"]:
-                    log.info(
-                        "job_effect_dispatch_batch",
-                        claimed=result["claimed"],
-                        succeeded=result["succeeded"],
-                        retryable=result["retryable"],
-                        indeterminate=result["indeterminate"],
-                        conflict=result["conflict"],
-                        dead=result["dead"],
-                    )
-                backoff.success()
-            except Exception:
-                log.error("job_effect_dispatch_batch_failed", error_code="batch_failure")
-                backoff.failure()
+        except Exception as e:
+            log.error("job_effect_dispatch_batch_failed", error_code="batch_failure")
+            backoff.failure(e, error_code="batch_failure")
         try:
             await asyncio.wait_for(
                 shutdown_event.wait(), timeout=backoff.delay_until_next_attempt()

@@ -128,6 +128,7 @@ _CHECKPOINT_TABLES = (
     "loan_repayments",
     "dividends_log",
     "retry_state",
+    "task_failure_history",
 )
 
 # Primary-key columns used for privacy-safe key-level diffs (names only, never values).

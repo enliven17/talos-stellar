@@ -538,25 +538,18 @@ CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     (
         14,
         """
-CREATE TABLE IF NOT EXISTS task_executions (
-    execution_id TEXT PRIMARY KEY,
-    task_name    TEXT NOT NULL,
-    status       TEXT NOT NULL CHECK (
-        status IN ('reserved', 'succeeded', 'retryable', 'uncertain')
-    ),
-    owner_id     TEXT NOT NULL,
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS task_failure_history (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    talos_id         TEXT NOT NULL DEFAULT '',
+    task_name        TEXT NOT NULL,
+    attempt_number   INTEGER NOT NULL,
+    error_code       TEXT NOT NULL,
+    next_eligible_at TEXT NOT NULL,
+    recorded_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_task_executions_task_status
-    ON task_executions(task_name, status, created_at DESC);
-ALTER TABLE commerce_queue ADD COLUMN payload_retained_until TEXT;
-UPDATE commerce_queue
-SET payload_retained_until = datetime(updated_at, '+30 days')
-WHERE status = 'completed' AND payload IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_commerce_queue_retention
-    ON commerce_queue(status, payload_retained_until);
+CREATE INDEX IF NOT EXISTS idx_task_failure_history_lookup
+    ON task_failure_history(talos_id, task_name, recorded_at DESC);
         """,
     ),
 ]

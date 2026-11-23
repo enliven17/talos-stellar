@@ -29,13 +29,7 @@ from talos_agent.db.repos import (
     RetryRepo,
     SpendingRepo,
 )
-from talos_agent.db.retention import (
-    RecordClass,
-    StateRetentionPreviewReport,
-    TableRetentionPreview,
-    preview_state_retention,
-    preview_table_retention,
-)
+from talos_agent.db.repos.retry import normalize_error_code
 
 __all__ = [
     # Config
@@ -47,6 +41,7 @@ __all__ = [
     "_MIGRATIONS",
     "get_db_path",
     "normalize_playbook_name",
+    "normalize_error_code",
     "run_migrations",
     # Repositories
     "ActivityRepo",
