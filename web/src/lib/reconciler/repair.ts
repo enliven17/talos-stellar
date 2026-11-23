@@ -17,9 +17,10 @@
 
 import { eq, and, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { tlsCommerceJobs, tlsTokenPurchases, tlsStellarTxRecords } from "@/db/schema";
+import { tlsCommerceJobs, tlsStellarTxRecords, tlsTokenPurchases } from "@/db/schema";
 import { logger } from "@/lib/logger";
-import type { TxRecord, RepairOutcome } from "./types";
+import { canCreditJob, formatAssociationConflictError } from "./state-machine";
+import type { TxAssociation, TxRecord, RepairOutcome } from "./types";
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
@@ -68,6 +69,44 @@ async function repairCommerceJob(record: TxRecord): Promise<RepairOutcome> {
 
   try {
     if (finalityStatus === "CONFIRMED") {
+      // Before crediting/confirming the job, verify that this payment identity
+      // (txHash) is not associated with an incompatible commerce job.
+      const associatedJobs = await db
+        .select({ id: tlsCommerceJobs.id })
+        .from(tlsCommerceJobs)
+        .where(eq(tlsCommerceJobs.txHash, record.txHash));
+
+      const existingAssociations: TxAssociation[] = associatedJobs.map((row) => ({
+        txHash: record.txHash,
+        sourceType: "commerce_job",
+        sourceId: row.id,
+      }));
+
+      const creditDecision = canCreditJob(record, existingAssociations);
+      if (!creditDecision.allowed) {
+        if (creditDecision.conflict) {
+          await db
+            .update(tlsStellarTxRecords)
+            .set({
+              lastError: formatAssociationConflictError(creditDecision.conflict),
+              updatedAt: new Date(),
+            })
+            .where(eq(tlsStellarTxRecords.id, record.id));
+
+          logger.warn(
+            {
+              jobId,
+              txHash: record.txHash,
+              existingSourceId: creditDecision.conflict.existingSourceId,
+              incomingSourceId: creditDecision.conflict.incomingSourceId,
+            },
+            "reconciler_job_association_conflict",
+          );
+        }
+
+        return { ok: false, error: creditDecision.reason };
+      }
+
       // Tx confirmed — the job payment is settled.  Jobs start in "pending"
       // which means the agent has not fulfilled yet; we do not need to change
       // anything.  If someone already set it to "completed" or "failed",

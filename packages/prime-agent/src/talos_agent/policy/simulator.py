@@ -15,14 +15,83 @@ from dataclasses import dataclass
 from typing import Any
 
 from talos_agent.policy.engine import PolicyEngine
-from talos_agent.policy.schema import (
-    ActionSpec,
-    Policy,
-    PolicyDecisionTrace,
-    PolicyResult,
-)
+from talos_agent.policy.schema import ActionSpec, PolicyResult, redact_trace_value
+from talos_agent.redact import redact_text
 
 logger = logging.getLogger(__name__)
+_MAX_EXPORTED_REASON_LENGTH = 256
+_MAX_EXPORTED_ARGUMENTS = 32
+_MAX_EXPORTED_NESTING = 4
+
+
+def _bounded_reason(reason: str) -> str:
+    redacted = redact_text(reason)
+    if len(redacted) <= _MAX_EXPORTED_REASON_LENGTH:
+        return redacted
+    return redacted[: _MAX_EXPORTED_REASON_LENGTH - 3] + "..."
+
+
+def _is_private_argument(path: str, private_arguments: frozenset[str]) -> bool:
+    normalized = path.casefold()
+    field_name = normalized.rsplit(".", 1)[-1]
+    return any(
+        normalized == name or normalized.endswith(f".{name}") or field_name == name
+        for name in private_arguments
+    )
+
+
+def _export_arguments(
+    value: Any,
+    *,
+    path: str,
+    private_arguments: frozenset[str],
+    depth: int = 0,
+) -> Any:
+    if _is_private_argument(path, private_arguments):
+        return "[redacted]"
+    if isinstance(value, dict):
+        if depth >= _MAX_EXPORTED_NESTING:
+            return "[truncated]"
+        exported: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _MAX_EXPORTED_ARGUMENTS:
+                exported["..."] = "[truncated]"
+                break
+            key_text = str(key)
+            child_path = f"{path}.{key_text}" if path else key_text
+            exported[key_text] = _export_arguments(
+                item,
+                path=child_path,
+                private_arguments=private_arguments,
+                depth=depth + 1,
+            )
+        return exported
+    if isinstance(value, (list, tuple)):
+        items = [
+            _export_arguments(
+                item,
+                path=path,
+                private_arguments=private_arguments,
+                depth=depth + 1,
+            )
+            for item in value[:8]
+        ]
+        if len(value) > 8:
+            items.append("[truncated]")
+        return items
+    return redact_trace_value(path or "argument", value)
+
+
+def _export_step(step: Any, private_arguments: frozenset[str]) -> dict[str, Any]:
+    exported = step.to_dict()
+    exported["reason"] = _bounded_reason(step.reason)
+    for condition in exported["conditions"]:
+        if _is_private_argument(condition["field"], private_arguments):
+            if condition["observed"] is not None:
+                condition["observed"] = "[redacted]"
+            if condition["expected"] is not None:
+                condition["expected"] = "[redacted]"
+    return exported
 
 
 @dataclass(frozen=True)
@@ -217,71 +286,58 @@ class PolicySimulator:
                 })
         return results
 
-    @staticmethod
-    def compare_policies(
-        baseline: list[Policy],
-        candidate: list[Policy],
-        scenarios: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Offline comparison of two policy versions over the same scenarios.
+    def export_decision(
+        self,
+        action: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        private_arguments: tuple[str, ...] | set[str] | frozenset[str] = (),
+    ) -> None:
+        """Simulate one action and export its privacy-safe decision explanation.
 
-        Each version is evaluated on its own freshly created, enabled engine,
-        so no live engine state or metrics are touched and nothing is
-        enforced, persisted or sent anywhere.
-
-        ``newly_allowed`` lists scenarios whose decision changed from
-        non-approve to ``approve``; ``newly_denied`` lists scenarios that went
-        from ``approve`` to ``deny`` or ``escalate``.  Other decision changes
-        (e.g. escalate -> deny) appear in ``other_changes``.
+        ``private_arguments`` names tool arguments that must be redacted even
+        when their names do not match the built-in sensitive-field patterns.
+        Dotted names can classify nested arguments, for example
+        ``{"profile.ssn"}``.
         """
-        sims = []
-        for policies in (baseline, candidate):
-            engine = PolicyEngine()
-            engine.enabled = True
-            engine.load(list(policies))
-            sims.append(PolicySimulator(engine))
-        base_rows = sims[0].simulate_batch(scenarios)
-        cand_rows = sims[1].simulate_batch(scenarios)
-
-        newly_allowed: list[dict[str, Any]] = []
-        newly_denied: list[dict[str, Any]] = []
-        other_changes: list[dict[str, Any]] = []
-        errors: list[dict[str, Any]] = []
-        unchanged = 0
-        for b, c in zip(base_rows, cand_rows):
-            if "error" in b or "error" in c:
-                errors.append({
-                    "scenario_index": b["scenario_index"],
-                    "action": b["action"],
-                    "baseline_error": b.get("error"),
-                    "candidate_error": c.get("error"),
-                })
-                continue
-            before, after = b["decision"], c["decision"]
-            if before == after:
-                unchanged += 1
-                continue
-            row = {
-                "scenario_index": b["scenario_index"],
-                "action": b["action"],
-                "baseline": before,
-                "candidate": after,
-            }
-            if after == "approve":
-                newly_allowed.append(row)
-            elif before == "approve":
-                newly_denied.append(row)
-            else:
-                other_changes.append(row)
-
-        return {
-            "total": len(scenarios),
-            "unchanged": unchanged,
-            "newly_allowed": newly_allowed,
-            "newly_denied": newly_denied,
-            "other_changes": other_changes,
-            "errors": errors,
+        params = params or {}
+        private_names = frozenset(name.casefold() for name in private_arguments)
+        result = self.simulate(action, params, context)
+        trace = result.trace
+        steps = trace.steps if trace is not None else ()
+        payload = {
+            "action": action,
+            "decision": result.decision.value,
+            "evaluated_at": result.evaluated_at,
+            "result_digest": result.result_digest,
+            "simulation": result.simulation,
+            "arguments": _export_arguments(
+                params,
+                path="",
+                private_arguments=private_names,
+            ),
+            "summary": _bounded_reason(
+                trace.summary if trace is not None else result.explain()
+            ),
+            "matched_rules": [
+                {
+                    "policy": step.policy,
+                    "rule_id": step.rule_id,
+                    "severity": step.severity,
+                    "decision": step.decision,
+                    "reason": _bounded_reason(step.reason),
+                }
+                for step in steps
+                if step.matched
+            ],
+            "steps": [_export_step(step, private_names) for step in steps],
         }
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, sort_keys=True)
+            file.write("\n")
+        logger.info("Exported policy decision explanation to %s", path)
 
     def export_scenarios(self, scenarios: list[dict[str, Any]], path: str) -> None:
         """Run a batch of scenarios and write the results to a JSON file.

@@ -107,6 +107,8 @@ All read from the environment at process start (see `.env.example`):
 | `ADMIN_API_KEY` | — | Bearer token for `/api/admin/jobs/*`. Required to use those routes. |
 | `INTERNAL_JOBS_SECRET` | — | Shared secret for `/api/internal/jobs/drain`. Required to use it. |
 | `JOBS_LEASE_DURATION_MS` | `30000` | How long a lease is held before it's reapable. |
+| `JOBS_MAX_LEASE_EXTENSION_MS` | `3600000` | Maximum duration a single lease extension request may add or set. |
+| `JOBS_MAX_LEASE_HORIZON_MS` | `86400000` | Maximum absolute future horizon a lease may be extended to from `now`. |
 | `JOBS_HEARTBEAT_INTERVAL_MS` | `10000` | How often a running handler heartbeats. |
 | `JOBS_BATCH_SIZE` | `10` | Jobs claimed per `runOnce()` call. |
 | `JOBS_DEFAULT_MAX_ATTEMPTS` | `8` | Default ceiling for jobs that don't specify one. |
@@ -148,6 +150,7 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 - `GET /api/admin/jobs?status=&queue=&cursor=&limit=` — list, cursor-paginated by `createdAt` descending (same convention as the rest of the API — see `OBSERVABILITY.md`).
 - `GET /api/admin/jobs/:id` — full record, including `payload` and `result`, for debugging a stuck or dead-lettered job.
 - `POST /api/admin/jobs/:id/retry` — requeue a `dead_letter`/`cancelled` job (resets attempts, clears `lastError`). 409 if the job isn't in one of those states.
+- `POST /api/admin/jobs/bulk-retry` — dry-run bulk retry preview (`dryRun: true`, default) that filters candidate jobs, counts eligible vs. ineligible jobs with explicit reasons (`eligible`, `not_found`, `status_not_failed`, `cancelled_excluded`, `queue_mismatch`, `retry_class_mismatch`, `fatal_retry_class`), and returns each eligible job's `revision` (`updatedAt` ISO timestamp). Executing (`dryRun: false`) requires explicit `selections: [{ id, revision }]` and atomically verifies each job's revision is unchanged before requeuing (returning `409` if all requested jobs fail with `revision_mismatch`).
 - `POST /api/admin/jobs/:id/cancel` — cooperative cancel. 409 if the job is already in a terminal state.
 
 ## Observability

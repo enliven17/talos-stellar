@@ -867,14 +867,20 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
 @click.argument("artifact", type=click.Path(exists=True, dir_okay=False))
 @click.option("--passphrase", default=None, help="Backup passphrase (Prompted if not provided.)")
 @click.option("--confirm", is_flag=True, help="Overwrite existing agent DB. Required if state already exists.")
-@click.option("--agent-id", default=None, help="Talos ID for multi-agent mode")
+@click.option(
+    "--agent-id",
+    default=None,
+    help="Expected agent ID; restore rejects a database with a different identity",
+)
 @click.option("--restore-root", default=None, help="Override restore root (default: ~/.talos-agent)")
 def restore(artifact, passphrase, confirm, agent_id, restore_root):
     """Restore agent state from an encrypted backup artifact.
 
     By default this is a dry run that prints the manifest. Pass --confirm
-    to actually replace the local SQLite state. Any existing files are
-    backed up to `.pre-restore` siblings first.
+    to actually replace the local SQLite state. The artifact is staged in
+    an isolated candidate directory and its SQLite integrity, schema, and
+    agent identity are verified before any live database is replaced. Any
+    existing files are backed up to `.pre-restore` siblings first.
     """
     from pathlib import Path as _Path
     from talos_agent.backup_service import (

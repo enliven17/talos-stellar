@@ -30,6 +30,7 @@ import {
   getQueueCount,
   isRunning,
 } from "../src/lib/reconciler/scheduler";
+import { TxAssociationConflictError } from "../src/lib/reconciler/state-machine";
 import type { TxRecord, ReconcilerConfig } from "../src/lib/reconciler/types";
 
 function chainable<T>(result: T) {
@@ -255,68 +256,58 @@ describe("reconciler/scheduler - Cancellation & Graceful Shutdown", () => {
   });
 });
 
-describe("reconciler/scheduler - Pinned Network Identity", () => {
-  const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
-  const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
-
-  it("registerTx persists pinned network passphrase into database record", async () => {
-    mocks.mockDb.select.mockReturnValue(chainable([])); // No existing record
-    mocks.mockDb.insert.mockReturnValue(chainable([]));
+describe("reconciler/scheduler - registerTx conflict detection", () => {
+  it("returns existing id idempotently when txHash is re-registered for the same job", async () => {
+    mocks.mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "rec_existing",
+          txHash: "tx_same_1",
+          sourceType: "commerce_job",
+          sourceId: "job_1",
+        },
+      ]),
+    );
 
     const id = await registerTx({
-      txHash: "0xdeadbeef123",
+      txHash: "tx_same_1",
       sourceType: "commerce_job",
-      sourceId: "job_pinned",
-      networkPassphrase: "testnet",
+      sourceId: "job_1",
     });
 
-    expect(id).toBeDefined();
-    expect(mocks.mockDb.insert).toHaveBeenCalled();
-    const insertArg = mocks.mockDb.insert.mock.results[0]?.value?.values?.mock?.calls?.[0]?.[0];
-    expect(insertArg).toMatchObject({
-      txHash: "0xdeadbeef123",
-      networkPassphrase: TESTNET_PASSPHRASE,
-      sourceType: "commerce_job",
-      sourceId: "job_pinned",
-      finalityStatus: "PENDING",
-    });
+    expect(id).toBe("rec_existing");
+    expect(mocks.mockDb.insert).not.toHaveBeenCalled();
+    expect(mocks.mockDb.update).not.toHaveBeenCalled();
   });
 
-  it("rejects foreign network observations without confirming or applying repair", async () => {
-    const record = makeRecord({
-      id: "rec_foreign",
-      txHash: "h_foreign",
-      finalityStatus: "PENDING",
-      networkPassphrase: TESTNET_PASSPHRASE,
-    });
-    mocks.mockDb.select.mockReturnValue(chainable([record]));
-    mocks.horizon.pollTransaction.mockResolvedValue({
-      outcome: "confirmed",
-      ledger: 1005,
-      successful: true,
-      networkPassphrase: MAINNET_PASSPHRASE,
-    });
+  it("rejects conflicting job association, records conflict in lastError, and does not insert a duplicate row", async () => {
+    mocks.mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "rec_existing",
+          txHash: "tx_conflict_1",
+          sourceType: "commerce_job",
+          sourceId: "job_1",
+        },
+      ]),
+    );
+    const updateChain = chainable([{}]);
+    mocks.mockDb.update.mockReturnValue(updateChain);
 
-    const summary = await runOneTick({
-      ...BASE_CONFIG,
-      networkPassphrase: TESTNET_PASSPHRASE,
-    });
+    await expect(
+      registerTx({
+        txHash: "tx_conflict_1",
+        sourceType: "commerce_job",
+        sourceId: "job_2",
+      }),
+    ).rejects.toThrow(TxAssociationConflictError);
 
-    // Summary must show NO confirmations and NO repairs
-    expect(summary.processed).toBe(1);
-    expect(summary.confirmed).toBe(0);
-    expect(summary.failed).toBe(0);
-    expect(summary.repairsApplied).toBe(0);
-    expect(mocks.repair.applyRepair).not.toHaveBeenCalled();
-
-    // Database update must have retained PENDING and set lastError
-    expect(mocks.mockDb.update).toHaveBeenCalled();
-    const updateArg = mocks.mockDb.update.mock.results[0]?.value?.set?.mock?.calls?.[0]?.[0];
-    expect(updateArg).toMatchObject({
-      finalityStatus: "PENDING",
-      networkPassphrase: TESTNET_PASSPHRASE,
-    });
-    expect(updateArg.lastError).toContain("Rejected observation from foreign network");
-    expect(updateArg.lastError).toContain(MAINNET_PASSPHRASE);
+    expect(mocks.mockDb.insert).not.toHaveBeenCalled();
+    expect(mocks.mockDb.update).toHaveBeenCalledTimes(1);
+    expect(updateChain.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastError: expect.stringContaining("ASSOCIATION_CONFLICT:"),
+      }),
+    );
   });
 });

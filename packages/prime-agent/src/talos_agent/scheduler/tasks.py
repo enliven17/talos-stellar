@@ -10,6 +10,9 @@ All tasks share:
 - ``api`` — for remote API calls.
 - ``settings`` — agent configuration.
 - A ``DurableBackoff`` instance for retry/restart resilience (where applicable).
+
+Attempts interrupted by intentional shutdown (``shutdown_event`` set or task
+cancellation) are not recorded as failures and never consume retry budget.
 """
 
 from __future__ import annotations
@@ -306,6 +309,34 @@ async def polling_task(
                             job.get("payload"),
                         )
 
+                jobs = await api.get_pending_jobs()
+                for job in jobs:
+                    if job_effect_store is not None:
+                        try:
+                            job_effect_store.ingest(job)
+                        except Exception as exc:
+                            from talos_agent.job_effects import JobEffectError
+                            if isinstance(exc, JobEffectError):
+                                log.warning("job_inbox_rejected", error_code=exc.code)
+                                continue
+                            raise
+                    else:
+                        db.add_commerce_job(
+                            job["id"],
+                            job["talosId"],
+                            job.get("serviceName", ""),
+                            job.get("payload"),
+                        )
+
+            backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
+        except Exception as e:
+            console.print(f"[dim red]Polling error: {e}[/dim red]")
+            if shutdown_event.is_set():
+                log.info("polling_attempt_interrupted_by_shutdown")
+            else:
                 backoff.success()
             except Exception as e:
                 console.print(f"[dim red]Polling error: {e}[/dim red]")
@@ -321,6 +352,10 @@ async def polling_task(
             break
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def heartbeat_task(
@@ -344,12 +379,18 @@ async def heartbeat_task(
             with _traced_task_run("heartbeat", talos_config):
                 await api.update_status(settings.talos_id, online=True)
             backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
         except Exception as e:
             logger.debug(f"Heartbeat error: {e}")
-            backoff.failure()
-            if backoff.terminal:
-                logger.warning("heartbeat_task: reached max_attempts — stopping task")
-                break
+            if shutdown_event.is_set():
+                log.info("heartbeat_attempt_interrupted_by_shutdown")
+            else:
+                backoff.failure()
+                if backoff.terminal:
+                    logger.warning("heartbeat_task: reached max_attempts — stopping task")
+                    break
 
         try:
             await asyncio.wait_for(
@@ -358,6 +399,10 @@ async def heartbeat_task(
             break
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def job_heartbeat_task(
@@ -391,9 +436,15 @@ async def job_heartbeat_task(
                 if not result:
                     logger.warning("job_lease_heartbeat_failed")
             backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
         except Exception as e:
             logger.debug("Job heartbeat error: %s", e)
-            backoff.failure()
+            if shutdown_event.is_set():
+                log.info("job_heartbeat_attempt_interrupted_by_shutdown")
+            else:
+                backoff.failure()
 
         if shutdown_drain_complete.is_set():
             break
@@ -411,6 +462,10 @@ async def job_heartbeat_task(
             )
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def activity_flush_task(
@@ -431,6 +486,27 @@ async def activity_flush_task(
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
+        try:
+            with _traced_task_run("activity_flush", talos_config):
+                pending = db.get_pending_activities()
+                if pending:
+                    for act in pending:
+                        await api.report_activity(
+                            settings.talos_id,
+                            type_=act["type"],
+                            content=act["content"],
+                            channel=act["channel"],
+                        )
+                    db.mark_activities_sent([a["id"] for a in pending])
+            backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
+        except Exception as e:
+            logger.debug(f"Activity flush error: {e}")
+            if shutdown_event.is_set():
+                log.info("activity_flush_attempt_interrupted_by_shutdown")
+            else:
         async with _task_slot(task_slots, shutdown_event) as has_slot:
             if not has_slot:
                 break
@@ -461,6 +537,10 @@ async def activity_flush_task(
             break
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def learning_cycle_task(
@@ -817,6 +897,26 @@ async def job_effect_dispatch_task(
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
+        try:
+            result = await job_effect_dispatcher.dispatch_once()
+            if result["claimed"]:
+                log.info(
+                    "job_effect_dispatch_batch",
+                    claimed=result["claimed"],
+                    succeeded=result["succeeded"],
+                    retryable=result["retryable"],
+                    indeterminate=result["indeterminate"],
+                    conflict=result["conflict"],
+                    dead=result["dead"],
+                )
+            backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
+        except Exception:
+            if shutdown_event.is_set():
+                log.info("job_effect_dispatch_interrupted_by_shutdown")
+            else:
         async with _task_slot(task_slots, shutdown_event) as has_slot:
             if not has_slot:
                 break
@@ -843,6 +943,10 @@ async def job_effect_dispatch_task(
             break
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def telegram_queue_task(

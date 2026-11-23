@@ -75,6 +75,54 @@ export interface TxRecord {
   updatedAt: Date;
 }
 
+// ─── Provider Failure Reason Codes ──────────────────────────────────────────
+
+/**
+ * Stable, machine-readable reason codes for Horizon provider failures.
+ * Bounded cardinality prevents metric explosion and enables deterministic error handling.
+ */
+export const HORIZON_PROVIDER_FAILURE_REASONS = [
+  // Authorization failures (e.g. HTTP 401, HTTP 403)
+  "UNAUTHORIZED",
+  "FORBIDDEN",
+  "AUTHORIZATION_FAILURE",
+
+  // Throttling / rate-limiting (e.g. HTTP 429)
+  "RATE_LIMITED",
+  "THROTTLED",
+
+  // Upstream provider / server failures (e.g. HTTP 500, 502, 503, 504)
+  "PROVIDER_UNAVAILABLE",
+  "PROVIDER_ERROR",
+  "PROVIDER_FAILURE",
+  "SERVER_ERROR",
+  "BAD_GATEWAY",
+  "GATEWAY_TIMEOUT",
+
+  // Transport / network failures (e.g. connection refused, timeout, network blip)
+  "NETWORK_ERROR",
+
+  // Client errors (e.g. HTTP 400 Bad Request)
+  "BAD_REQUEST",
+
+  // Unclassified / unknown errors
+  "UNKNOWN",
+] as const;
+
+export type HorizonProviderFailureReasonCode =
+  (typeof HORIZON_PROVIDER_FAILURE_REASONS)[number];
+
+/** Aliases for forward and backward compatibility. */
+export type ProviderFailureReasonCode = HorizonProviderFailureReasonCode;
+export type HorizonFailureReasonCode = HorizonProviderFailureReasonCode;
+
+/** Broad category classification for provider failure reasons. */
+export type HorizonFailureCategory =
+  | "authorization"
+  | "throttling"
+  | "provider_failure"
+  | "unknown";
+
 // ─── Horizon Poll Result ──────────────────────────────────────────────────────
 
 /** Discriminated union returned by the Horizon polling layer. */
@@ -114,6 +162,7 @@ export interface TxRecordUpdate {
   confirmedLedger?: number;
   pollCount?: number;
   lastError?: string | null;
+  reasonCode?: HorizonProviderFailureReasonCode;
   repairApplied?: boolean;
   updatedAt?: Date;
 }
@@ -124,6 +173,31 @@ export interface TxRecordUpdate {
 export type RepairOutcome =
   | { ok: true;  repaired: boolean; detail?: string }
   | { ok: false; error: string; stale?: boolean };
+
+// ─── Transaction Association Conflict Detection ───────────────────────────────
+
+/** Minimal association binding a Stellar payment identity (txHash) to a job/source. */
+export interface TxAssociation {
+  txHash: string;
+  sourceType: TxSourceType;
+  sourceId: string | null;
+}
+
+/** Structured record of a conflicting payment-to-job association. */
+export interface TxAssociationConflict {
+  txHash: string;
+  existingSourceType: TxSourceType;
+  existingSourceId: string | null;
+  incomingSourceType: TxSourceType;
+  incomingSourceId: string | null;
+  reason: string;
+  detectedAt: Date;
+}
+
+/** Result of checking whether a job may be credited for a transaction record. */
+export type JobCreditDecision =
+  | { allowed: true }
+  | { allowed: false; reason: string; conflict?: TxAssociationConflict };
 
 // ─── Reconciler Config ────────────────────────────────────────────────────────
 
