@@ -5,6 +5,8 @@
  * instance.  The tests cover:
  *
  *   – floorToWindow / nextWindowStart helpers
+ *   – computeQuotaWindow canonical boundary calculations and injected clock
+ *   – month transitions, leap year (Feb 29), and non-leap year (Feb 28) boundary behavior
  *   – resolveQuotaConfig precedence (agent > platform > fallback)
  *   – checkAndIncrementQuota: disabled, under limit, at limit, over limit
  *   – readQuotaUsage: existing row, no row
@@ -12,7 +14,7 @@
  *   – buildQuotaHeaders / applyQuotaHeaders: header values
  */
 
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // ── Hoisted mocks ─────────────────────────────────────────────────────────────
 
@@ -56,6 +58,13 @@ vi.mock("@/db/schema", () => ({
     windowStart: "windowStart",
     count: "count",
   },
+  tlsQuotaScopeUsage: {
+    talosId: "talosId",
+    resource: "resource",
+    scope: "scope",
+    windowStart: "windowStart",
+    count: "count",
+  },
 }));
 
 vi.mock("drizzle-orm", () => ({
@@ -74,9 +83,11 @@ vi.mock("drizzle-orm", () => ({
 import {
   floorToWindow,
   nextWindowStart,
+  computeQuotaWindow,
   resolveQuotaConfig,
   checkAndIncrementQuota,
   readQuotaUsage,
+  readQuotaUsageBreakdown,
   quotaExceededResponse,
   buildQuotaHeaders,
   buildQuotaExplanation,
@@ -110,10 +121,26 @@ function makeQuotaConfigRow(overrides: Record<string, unknown> = {}) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+const ORIGINAL_MAX_RETRY_AFTER = process.env.QUOTA_MAX_RETRY_AFTER_SECONDS;
+const ORIGINAL_UNKNOWN_RETRY_AFTER = process.env.QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS;
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.dbSelect.mockImplementation(() => mocks.makeSelectChain([]));
   mocks.dbInsert.mockImplementation(() => mocks.makeInsertChain([{ count: 1 }]));
+});
+
+afterEach(() => {
+  if (ORIGINAL_MAX_RETRY_AFTER === undefined) {
+    delete process.env.QUOTA_MAX_RETRY_AFTER_SECONDS;
+  } else {
+    process.env.QUOTA_MAX_RETRY_AFTER_SECONDS = ORIGINAL_MAX_RETRY_AFTER;
+  }
+  if (ORIGINAL_UNKNOWN_RETRY_AFTER === undefined) {
+    delete process.env.QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS;
+  } else {
+    process.env.QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS = ORIGINAL_UNKNOWN_RETRY_AFTER;
+  }
 });
 
 // ─── floorToWindow ────────────────────────────────────────────────────────────
@@ -164,7 +191,7 @@ describe("nextWindowStart", () => {
     expect(next.toISOString()).toBe("2026-08-01T00:00:00.000Z");
   });
 
-  it("handles month-end correctly (July 31 → August 31)", () => {
+  it("handles month-end correctly (July 31 → August 01 for daily)", () => {
     const start = new Date("2026-07-31T00:00:00.000Z");
     const next = nextWindowStart(start, "daily");
     expect(next.toISOString()).toBe("2026-08-01T00:00:00.000Z");
@@ -174,6 +201,82 @@ describe("nextWindowStart", () => {
     const start = new Date("2026-07-01T00:00:00.000Z");
     nextWindowStart(start, "monthly");
     expect(start.toISOString()).toBe("2026-07-01T00:00:00.000Z");
+  });
+});
+
+// ─── computeQuotaWindow & Injected Clock ───────────────────────────────────────
+
+describe("computeQuotaWindow", () => {
+  it("returns synchronized window boundaries and consistent header/ISO representations", () => {
+    const clock = new Date("2026-07-24T14:37:45.123Z");
+    const boundaries = computeQuotaWindow(clock, "hourly");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2026-07-24T14:00:00.000Z");
+    expect(boundaries.resetAt).toBe(new Date("2026-07-24T15:00:00.000Z").getTime());
+    expect(boundaries.resetAtIso).toBe("2026-07-24T15:00:00.000Z");
+    expect(boundaries.resetAtHeader).toBe(String(Math.ceil(boundaries.resetAt / 1000)));
+
+    // Verify consistency: header in seconds converted back to ms matches boundary
+    expect(Number(boundaries.resetAtHeader) * 1000).toBe(boundaries.resetAt);
+    expect(new Date(Number(boundaries.resetAtHeader) * 1000).toISOString()).toBe(boundaries.resetAtIso);
+  });
+
+  it("preserves exact window boundaries when clock is at exactly 00:00:00.000", () => {
+    const exactStart = new Date("2026-07-24T00:00:00.000Z");
+    const boundaries = computeQuotaWindow(exactStart, "daily");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2026-07-24T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2026-07-25T00:00:00.000Z");
+    expect(boundaries.resetAtHeader).toBe(String(boundaries.resetAt / 1000));
+  });
+
+  it("handles leap year February 29 properly for daily windows", () => {
+    // 2024 is a leap year; Feb 29 23:59:59 resets to March 1 00:00:00
+    const leapDay = new Date("2024-02-29T23:59:59.999Z");
+    const boundaries = computeQuotaWindow(leapDay, "daily");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2024-02-29T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2024-03-01T00:00:00.000Z");
+    expect(boundaries.resetAtHeader).toBe(String(new Date("2024-03-01T00:00:00.000Z").getTime() / 1000));
+  });
+
+  it("handles leap year February for monthly windows", () => {
+    // Starting in February of leap year 2024
+    const leapMonth = new Date("2024-02-15T10:00:00.000Z");
+    const boundaries = computeQuotaWindow(leapMonth, "monthly");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2024-02-01T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2024-03-01T00:00:00.000Z");
+    expect(boundaries.resetAtHeader).toBe(String(new Date("2024-03-01T00:00:00.000Z").getTime() / 1000));
+  });
+
+  it("handles non-leap year February 28 transition to March 1", () => {
+    // 2023 is not a leap year; Feb 28 daily resets to March 1
+    const nonLeapFeb = new Date("2023-02-28T12:00:00.000Z");
+    const boundaries = computeQuotaWindow(nonLeapFeb, "daily");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2023-02-28T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2023-03-01T00:00:00.000Z");
+  });
+
+  it("handles year transition month boundary (December 31 → January 1)", () => {
+    const yearEnd = new Date("2025-12-31T23:59:59.000Z");
+    const monthlyBoundaries = computeQuotaWindow(yearEnd, "monthly");
+
+    expect(monthlyBoundaries.windowStart.toISOString()).toBe("2025-12-01T00:00:00.000Z");
+    expect(monthlyBoundaries.resetAtIso).toBe("2026-01-01T00:00:00.000Z");
+
+    const dailyBoundaries = computeQuotaWindow(yearEnd, "daily");
+    expect(dailyBoundaries.windowStart.toISOString()).toBe("2025-12-31T00:00:00.000Z");
+    expect(dailyBoundaries.resetAtIso).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("accepts timestamp numbers as injected clock", () => {
+    const ms = new Date("2026-08-15T10:20:30.000Z").getTime();
+    const boundaries = computeQuotaWindow(ms, "daily");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2026-08-15T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2026-08-16T00:00:00.000Z");
   });
 });
 
@@ -320,15 +423,12 @@ describe("checkAndIncrementQuota", () => {
     expect(result.resource).toBe("job_writes");
   });
 
-  it("includes a resetAt timestamp in the future", async () => {
-    mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([])); // disabled
+  it("includes a resetAt timestamp matching injected clock across leap day", async () => {
+    const leapClock = new Date("2024-02-29T12:00:00.000Z");
+    mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([])); // disabled fallback (daily window)
 
-    const before = Date.now();
-    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "revenue_writes");
-    const after = Date.now() + 24 * 60 * 60 * 1000; // upper bound: ~1 day ahead
-
-    expect(result.resetAt).toBeGreaterThanOrEqual(before);
-    expect(result.resetAt).toBeLessThanOrEqual(after);
+    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "revenue_writes", leapClock);
+    expect(result.resetAt).toBe(new Date("2024-03-01T00:00:00.000Z").getTime());
   });
 
   it("performs an upsert when quota is enabled", async () => {
@@ -338,7 +438,39 @@ describe("checkAndIncrementQuota", () => {
 
     await checkAndIncrementQuota(fakeDb, "agent-1", "activity_writes");
 
-    expect(mocks.dbInsert).toHaveBeenCalledTimes(1);
+    expect(mocks.dbInsert).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps total enforcement working when the breakdown write fails", async () => {
+    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 5, enabled: true });
+    mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([configRow]));
+    mocks.dbInsert
+      .mockReturnValueOnce(mocks.makeInsertChain([{ count: 2 }]))
+      .mockImplementationOnce(() => { throw new Error("scope table unavailable"); });
+
+    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "activity_writes");
+
+    expect(result).toMatchObject({ ok: true, used: 2, remaining: 3 });
+  });
+});
+
+describe("readQuotaUsageBreakdown", () => {
+  it("returns only bounded known scopes and preserves zero buckets", async () => {
+    const config = makeQuotaConfigRow({ resource: "activity_writes", windowSize: "daily" });
+    mocks.dbSelect
+      .mockReturnValueOnce(mocks.makeSelectChain([config]))
+      .mockReturnValueOnce(
+        mocks.makeSelectChain([
+          { scope: "activity:write", count: 7 },
+          { scope: "request:/arbitrary", count: 99 },
+        ]),
+      );
+
+    const breakdown = await readQuotaUsageBreakdown(fakeDb, "agent-1", "activity_writes");
+
+    expect(breakdown["activity:write"]).toBe(7);
+    expect(breakdown["commerce:read"]).toBe(0);
+    expect(Object.keys(breakdown)).not.toContain("request:/arbitrary");
   });
 });
 
@@ -380,7 +512,8 @@ describe("readQuotaUsage", () => {
     );
     mocks.dbSelect.mockReturnValueOnce(usageChain);
 
-    const result = await readQuotaUsage(fakeDb, "agent-1", "activity_writes");
+    const clock = new Date("2024-02-29T18:00:00.000Z");
+    const result = await readQuotaUsage(fakeDb, "agent-1", "activity_writes", clock);
 
     expect(result.used).toBe(42);
     expect(result.remaining).toBe(58);
@@ -455,13 +588,18 @@ describe("quotaExceededResponse", () => {
     expect(resp.status).toBe(429);
   });
 
-  it("includes X-Quota-* headers", () => {
+  it("includes X-Quota-* headers consistent with JSON body", async () => {
     const resp = quotaExceededResponse(exceeded);
     expect(resp.headers.get("X-Quota-Limit")).toBe("100");
     expect(resp.headers.get("X-Quota-Remaining")).toBe("0");
     expect(resp.headers.get("X-Quota-Used")).toBe("101");
     expect(resp.headers.get("X-Quota-Resource")).toBe("activity_writes");
-    expect(resp.headers.get("X-Quota-Reset")).toBeTruthy();
+    expect(resp.headers.get("X-Quota-Reset")).toBe(String(exceeded.resetAt / 1000));
+
+    const body = await resp.json();
+    // Headers and body reflect the identical exact window boundary
+    expect(body.resetAt).toBe(new Date(exceeded.resetAt).toISOString());
+    expect(new Date(Number(resp.headers.get("X-Quota-Reset")) * 1000).toISOString()).toBe(body.resetAt);
   });
 
   it("body contains error, resource, limit, and resetAt", async () => {
@@ -476,6 +614,97 @@ describe("quotaExceededResponse", () => {
   it("Content-Type is application/json", () => {
     const resp = quotaExceededResponse(exceeded);
     expect(resp.headers.get("Content-Type")).toBe("application/json");
+  });
+
+  it("emits exact Retry-After seconds when remaining window is within cap", () => {
+    const nowMs = new Date("2026-07-24T14:58:00.000Z").getTime();
+    const hourlyReset = new Date("2026-07-24T15:00:00.000Z").getTime();
+    const resp = quotaExceededResponse(
+      { ...exceeded, resetAt: hourlyReset },
+      { nowMs, env: {} },
+    );
+
+    expect(resp.headers.get("Retry-After")).toBe("120");
+  });
+
+  it("caps Retry-After at 3600s for daily and monthly quota exhaustion while preserving X-Quota-Reset and ISO body.resetAt", async () => {
+    const nowMs = new Date("2026-07-01T04:00:00.000Z").getTime();
+
+    const dailyReset = new Date("2026-07-02T00:00:00.000Z").getTime(); // 20h ahead
+    const dailyResp = quotaExceededResponse(
+      { ...exceeded, resetAt: dailyReset },
+      { nowMs, env: {} },
+    );
+    expect(dailyResp.headers.get("Retry-After")).toBe("3600");
+    expect(dailyResp.headers.get("X-Quota-Reset")).toBe(String(Math.ceil(dailyReset / 1000)));
+    expect((await dailyResp.json()).resetAt).toBe("2026-07-02T00:00:00.000Z");
+
+    const monthlyReset = new Date("2026-08-01T00:00:00.000Z").getTime(); // 31d ahead
+    const monthlyResp = quotaExceededResponse(
+      { ...exceeded, resource: "job_writes", resetAt: monthlyReset },
+      { nowMs, env: {} },
+    );
+    expect(monthlyResp.headers.get("Retry-After")).toBe("3600");
+    expect(monthlyResp.headers.get("X-Quota-Reset")).toBe(String(Math.ceil(monthlyReset / 1000)));
+    expect((await monthlyResp.json()).resetAt).toBe("2026-08-01T00:00:00.000Z");
+  });
+
+  it("respects QUOTA_MAX_RETRY_AFTER_SECONDS and explicit options overrides", () => {
+    const nowMs = 1_753_350_000_000;
+    const farReset = nowMs + 10 * 3_600_000;
+
+    process.env.QUOTA_MAX_RETRY_AFTER_SECONDS = "900";
+    const envCapped = quotaExceededResponse({ ...exceeded, resetAt: farReset }, { nowMs });
+    expect(envCapped.headers.get("Retry-After")).toBe("900");
+
+    const optCapped = quotaExceededResponse(
+      { ...exceeded, resetAt: farReset },
+      { nowMs, maxRetryAfterSeconds: 180 },
+    );
+    expect(optCapped.headers.get("Retry-After")).toBe("180");
+  });
+
+  it("clamps past valid resetAt timestamps to Retry-After: 1", () => {
+    const nowMs = 1_753_350_000_000;
+    const resp = quotaExceededResponse(
+      { ...exceeded, resetAt: nowMs - 5_000 },
+      { nowMs, env: {} },
+    );
+    expect(resp.headers.get("Retry-After")).toBe("1");
+  });
+
+  it.each([
+    null,
+    undefined,
+    Number.NaN,
+    Infinity,
+    -Infinity,
+    0,
+    -5_000,
+    Number.MAX_SAFE_INTEGER,
+  ])(
+    "handles unknown/invalid resetAt %p without throwing, emits Retry-After: 60, omits X-Quota-Reset, and sets body.resetAt to null",
+    async (badResetAt) => {
+      const resp = quotaExceededResponse({
+        ...exceeded,
+        resetAt: badResetAt as number | null | undefined,
+      });
+      expect(resp.status).toBe(429);
+      expect(resp.headers.get("Retry-After")).toBe("60");
+      expect(resp.headers.get("X-Quota-Reset")).toBeNull();
+      const body = await resp.json();
+      expect(body.error).toBe("Quota exceeded");
+      expect(body.resetAt).toBeNull();
+    },
+  );
+
+  it("caps unknown-reset Retry-After when maxRetryAfterSeconds is smaller than 60", () => {
+    const resp = quotaExceededResponse(
+      { ...exceeded, resetAt: null },
+      { maxRetryAfterSeconds: 25, env: {} },
+    );
+    expect(resp.headers.get("Retry-After")).toBe("25");
+    expect(resp.headers.get("X-Quota-Reset")).toBeNull();
   });
 });
 
@@ -508,6 +737,21 @@ describe("buildQuotaHeaders", () => {
     // resetAt is 1_753_401_600_000 ms → 1_753_401_600 s
     expect(headers["X-Quota-Reset"]).toBe(String(Math.ceil(1_753_401_600_000 / 1000)));
   });
+
+  it.each([null, undefined, Number.NaN, Infinity, -Infinity, 0, -1])(
+    "omits X-Quota-Reset for unknown/invalid resetAt %p",
+    (badResetAt) => {
+      const headers = buildQuotaHeaders({
+        ...result,
+        resetAt: badResetAt as number | null | undefined,
+      });
+      expect(headers["X-Quota-Limit"]).toBe("500");
+      expect(headers["X-Quota-Remaining"]).toBe("490");
+      expect(headers["X-Quota-Used"]).toBe("10");
+      expect(headers["X-Quota-Resource"]).toBe("job_writes");
+      expect(headers["X-Quota-Reset"]).toBeUndefined();
+    },
+  );
 });
 
 // ─── applyQuotaHeaders ────────────────────────────────────────────────────────
@@ -551,6 +795,23 @@ describe("applyQuotaHeaders", () => {
     const resp = new Response(null, { status: 201 });
     const patched = applyQuotaHeaders(resp, result);
     expect(patched.status).toBe(201);
+  });
+
+  it("removes stale X-Quota-Reset when resetAt is unknown", () => {
+    const resp = new Response(null, {
+      status: 200,
+      headers: { "X-Quota-Reset": "9999999999" },
+    });
+    const patched = applyQuotaHeaders(resp, {
+      ok: true,
+      limit: 50,
+      remaining: 49,
+      used: 1,
+      resetAt: null,
+      resource: "sse_connections" as QuotaResource,
+    });
+    expect(patched.headers.get("X-Quota-Reset")).toBeNull();
+    expect(patched.headers.get("X-Quota-Limit")).toBe("50");
   });
 });
 

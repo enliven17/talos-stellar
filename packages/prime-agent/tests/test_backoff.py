@@ -2,6 +2,7 @@
 import logging
 from talos_agent.scheduler import Backoff
 
+
 def test_backoff_base_delay():
     b = Backoff(base_delay=10.0)
     assert b.next_delay() == 10.0
@@ -37,16 +38,25 @@ def test_backoff_reset():
     assert b.next_delay() == 10.0
 
 def test_backoff_jitter():
-    # With 20% jitter, 100.0 should be between 80.0 and 120.0
+    # With 20% jitter, 100.0 should be between 100.0 and 120.0
     b = Backoff(base_delay=10.0, initial_backoff=100.0, jitter=0.2)
     b.failure()
 
     delays = [b.next_delay() for _ in range(100)]
     for d in delays:
-        assert 80.0 <= d <= 120.0
+        assert 100.0 <= d <= 120.0
 
     # Ensure they are not all the same
     assert len(set(delays)) > 1
+
+
+def test_backoff_clamps_negative_jitter_to_nominal_delay(monkeypatch):
+    b = Backoff(base_delay=10.0, initial_backoff=100.0, jitter=0.2)
+    b.failure()
+    monkeypatch.setattr("talos_agent.scheduler.backoff.random.uniform", lambda lower, _upper: lower)
+
+    assert b.next_delay() == 100.0
+
 
 def test_backoff_logging(caplog):
     caplog.set_level(logging.DEBUG)

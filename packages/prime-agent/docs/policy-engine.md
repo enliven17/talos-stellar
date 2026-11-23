@@ -76,13 +76,40 @@ Policies are JSON files or Python dataclasses. Example:
           "severity": "blocker",
           "reason": "Transfers over 1000 XLM blocked on weekends."
         }
+      ],
+      "exceptions": [
+        {
+          "rule_id": "no-large-weekend-transfers",
+          "actor": "operator@example.test",
+          "reason": "Approved testnet settlement window",
+          "expires_at": "2030-01-01T00:00:00Z"
+        }
       ]
     }
   ]
 }
 ```
 
-Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
+Save to `~/.talos-agent/policies.json`. The engine hot-reloads on file change
+after validating and dry-run simulating the candidate policy set. If the file
+cannot be parsed, a rule is invalid, or the simulation fails, the active
+last-known-good policy snapshot remains in effect. The failed reload is logged
+and retried on the next hot-reload check; invalid policy data is not treated as
+an empty override set.
+
+### Time-bounded exceptions
+
+An exception is scoped to the containing policy and an exact `rule_id`. It
+must include a non-empty `actor`, a non-empty `reason`, and an explicit
+timezone-aware `expires_at` ISO-8601 timestamp. While active, it suppresses
+only that matching rule. At the expiry instant the exception is inactive and
+the original rule is enforced again; it never grants unrelated permissions.
+Expiry is exclusive, so an exception at exactly `expires_at` is already
+expired. Invalid exception metadata is rejected when the policy file loads.
+
+Each `rule_id` must be non-empty and unique across the complete loaded policy
+set. Duplicate or empty identifiers are rejected before policies are installed;
+rule IDs remain the stable link between decision traces and policy overrides.
 
 ### Supported operators
 
@@ -93,6 +120,16 @@ Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
 | `in`, `not_in` | Set membership |
 | `exists` | Field is present and non-null |
 | `regex` | Field matches the pattern in `value` |
+| `glob` | Field matches `*`, `?`, and character-class wildcards in `value` |
+
+Glob patterns support `*` (zero or more characters other than `/`), `?`
+(exactly one character other than `/`), `[abc]` and `[a-z]` (character
+classes), and `[!abc]` (negated character classes). Character classes match
+their explicit members, including `/`; `[[]` matches a literal `[`. Repeated
+`*` characters have the same behavior as `*` and do not match `/`. Empty,
+unclosed, or malformed character classes are rejected while policies are
+loaded; the agent will not silently ignore the invalid policy or fall back to
+built-in defaults.
 
 ### Field paths
 
@@ -133,11 +170,24 @@ from talos_agent.policy import PolicySimulator, PolicyEngine
 
 engine = PolicyEngine()
 engine.enabled = True
-engine.load(loader.load())
+engine.reload(loader.load())
 
 sim = PolicySimulator(engine)
 result = sim.simulate("transfer_xlm", {"amount": 500}, {"budget_remaining": 1000})
 print(result.decision)  # "escalate"
+```
+
+### Offline policy comparison
+
+Run the same synthetic scenarios against two policy versions and see what
+changes. Each version is evaluated on its own temporary engine, so nothing is
+enforced and live engine metrics are untouched.
+
+```python
+report = PolicySimulator.compare_policies(old_policies, new_policies, scenarios)
+report["newly_allowed"]  # approve in new, not in old
+report["newly_denied"]   # approve in old, deny/escalate in new
+report["other_changes"]  # e.g. escalate -> deny
 ```
 
 ## Rollback / disabling
@@ -169,6 +219,22 @@ Traces include per-rule and per-condition steps.  Secret-shaped fields
 (`api_key`, `seed`, `token`, `payment_proof`, etc.) are redacted as
 `[redacted]` and never logged or returned in cleartext.  BLOCKER
 short-circuits still emit the full trace up to the denying rule.
+
+### Dry-run policy coverage
+
+Simulation traces can be aggregated without exposing action parameters:
+
+```python
+report = sim.coverage_report(simulate_batch_results)
+print(report.to_dict())
+```
+
+Coverage is based only on rule steps present in the redacted traces. Each
+observed rule reports its `matched` and `not_matched` branches as exercised or
+unexercised. A rule omitted from every trace, including a rule after a blocker
+short-circuit, is listed under `unobserved_rules` and is not counted as tested.
+This prevents a partial dry-run cycle from falsely claiming coverage for
+rules it never reached.
 
 ## Observability
 
