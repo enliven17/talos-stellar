@@ -1,0 +1,36 @@
+{
+  "spec_version": "1.0.0",
+  "format": "talos-dividend-conservation-fixtures",
+  "description": "Canonical floor-allocation vectors shared by dividend clients and the TalosDividends contract.",
+  "rounding": "floor",
+  "roles": ["creator", "investor", "treasury"],
+  "cases": [
+    {
+      "id": "three-way-remainder",
+      "funded_amount": "103",
+      "shares": {"creator": 50, "investor": 30, "treasury": 20},
+      "claim_order": ["creator", "investor", "treasury"],
+      "expected_allocations": {"creator": "51", "investor": "30", "treasury": "20"},
+      "expected_claimed_amount": "101",
+      "expected_rounding_dust": "2"
+    },
+    {
+      "id": "same-liabilities-reversed-claim-order",
+      "funded_amount": "103",
+      "shares": {"creator": 50, "investor": 30, "treasury": 20},
+      "claim_order": ["treasury", "investor", "creator"],
+      "expected_allocations": {"creator": "51", "investor": "30", "treasury": "20"},
+      "expected_claimed_amount": "101",
+      "expected_rounding_dust": "2"
+    },
+    {
+      "id": "indivisible-unit-remainder",
+      "funded_amount": "101",
+      "shares": {"creator": 33, "investor": 33, "treasury": 34},
+      "claim_order": ["investor", "treasury", "creator"],
+      "expected_allocations": {"creator": "33", "investor": "33", "treasury": "34"},
+      "expected_claimed_amount": "100",
+      "expected_rounding_dust": "1"
+    }
+  ]
+}

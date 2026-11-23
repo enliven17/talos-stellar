@@ -21,9 +21,12 @@ def get_db_path(agent_id: str | None = None) -> Path:
     Resolved lazily so tests (and ops tooling) can monkeypatch ``APP_DIR``
     to redirect ``get_db_path()`` without rewriting module-level constants.
     """
+    import talos_agent.db as _db_pkg
+
+    base_dir = getattr(_db_pkg, "APP_DIR", APP_DIR)
     if agent_id:
-        return APP_DIR / f"agent-{agent_id}.db"
-    return APP_DIR / "talos-agent.db"
+        return base_dir / f"agent-{agent_id}.db"
+    return base_dir / "talos-agent.db"
 
 
 def normalize_playbook_name(name: str) -> str:
@@ -530,6 +533,30 @@ CREATE TABLE IF NOT EXISTS cycle_summaries (
 
 CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     ON cycle_summaries(talos_id, created_at DESC);
+        """,
+    ),
+    (
+        14,
+        """
+CREATE TABLE IF NOT EXISTS task_executions (
+    execution_id TEXT PRIMARY KEY,
+    task_name    TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (
+        status IN ('reserved', 'succeeded', 'retryable', 'uncertain')
+    ),
+    owner_id     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_executions_task_status
+    ON task_executions(task_name, status, created_at DESC);
+ALTER TABLE commerce_queue ADD COLUMN payload_retained_until TEXT;
+UPDATE commerce_queue
+SET payload_retained_until = datetime(updated_at, '+30 days')
+WHERE status = 'completed' AND payload IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_commerce_queue_retention
+    ON commerce_queue(status, payload_retained_until);
         """,
     ),
 ]

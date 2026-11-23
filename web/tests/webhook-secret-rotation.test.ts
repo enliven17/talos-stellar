@@ -152,4 +152,209 @@ describe("Webhook secret rotation (zero-downtime)", () => {
       expect(generateWebhookSecret()).not.toBe(s);
     });
   });
+
+  describe("key identifiers and bounded overlap interval", () => {
+    it("derives deterministic, non-reversible whkid_ identifiers", async () => {
+      const { deriveSigningKeyId, WEBHOOK_KEY_ID_PREFIX } = await import(
+        "@/lib/webhooks/signing"
+      );
+      const secretA = "whsec_rotation_key_alpha_123456";
+      const secretB = "whsec_rotation_key_beta_6543210";
+
+      const idA1 = deriveSigningKeyId(secretA);
+      const idA2 = deriveSigningKeyId(secretA);
+      const idB = deriveSigningKeyId(secretB);
+
+      expect(idA1).toBe(idA2);
+      expect(idA1).not.toBe(idB);
+      expect(idA1.startsWith(WEBHOOK_KEY_ID_PREFIX)).toBe(true);
+      expect(idA1).toMatch(/^whkid_[a-f0-9]{16}$/);
+      expect(idA1).not.toContain("alpha");
+    });
+
+    it("enforces bounded overlap interval limits", async () => {
+      const { validateOverlapSeconds } = await import("@/lib/webhooks/rotation");
+      const {
+        DEFAULT_SECRET_ROTATION_GRACE_SECONDS,
+        MIN_SECRET_ROTATION_GRACE_SECONDS,
+        MAX_SECRET_ROTATION_GRACE_SECONDS,
+      } = await import("@/lib/webhooks/config");
+
+      expect(validateOverlapSeconds(undefined)).toEqual({
+        ok: true,
+        seconds: DEFAULT_SECRET_ROTATION_GRACE_SECONDS,
+      });
+      expect(validateOverlapSeconds(MIN_SECRET_ROTATION_GRACE_SECONDS)).toEqual({
+        ok: true,
+        seconds: MIN_SECRET_ROTATION_GRACE_SECONDS,
+      });
+      expect(validateOverlapSeconds(MAX_SECRET_ROTATION_GRACE_SECONDS)).toEqual({
+        ok: true,
+        seconds: MAX_SECRET_ROTATION_GRACE_SECONDS,
+      });
+
+      for (const invalid of [
+        0,
+        -60,
+        MIN_SECRET_ROTATION_GRACE_SECONDS - 1,
+        MAX_SECRET_ROTATION_GRACE_SECONDS + 1,
+        300.5,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        const res = validateOverlapSeconds(invalid);
+        expect(res.ok).toBe(false);
+      }
+    });
+
+    it("verifies in-flight and overlapping deliveries across a controlled rotation", async () => {
+      const {
+        deriveSigningKeyId,
+        encryptSecret,
+        signPayloadWithKeyIds,
+        verifySignatureWithDetails,
+      } = await import("@/lib/webhooks/signing");
+      const { resolveSigningSecrets } = await import("@/lib/webhooks/rotation");
+
+      const oldSecret = "whsec_inflight_old_key_11111111";
+      const newSecret = "whsec_inflight_new_key_22222222";
+      const oldKid = deriveSigningKeyId(oldSecret);
+      const newKid = deriveSigningKeyId(newSecret);
+      const payload = JSON.stringify({ event: "approval.approved", id: "evt_rot_1" });
+
+      const t0 = new Date("2026-11-19T12:00:00.000Z");
+      const overlapExpires = new Date(t0.getTime() + 600_000); // 10 min overlap
+      const nowSec = Math.floor(t0.getTime() / 1000);
+
+      // 1. In-flight delivery signed before rotation (old key only)
+      const preRotationSigned = signPayloadWithKeyIds(
+        payload,
+        [{ id: oldKid, secret: oldSecret }],
+        1,
+        nowSec,
+      );
+      expect(preRotationSigned.keyIds).toEqual([oldKid]);
+      expect(preRotationSigned.keyIdHeader).toBe(oldKid);
+
+      // Consumer holding both keys during rollout verifies the in-flight delivery
+      const inflightCheck = verifySignatureWithDetails(
+        payload,
+        preRotationSigned.signature,
+        { [oldKid]: oldSecret, [newKid]: newSecret },
+        { keyIdHeader: preRotationSigned.keyIdHeader, nowSec },
+      );
+      expect(inflightCheck).toMatchObject({
+        valid: true,
+        matchedKeyId: oldKid,
+        version: 1,
+      });
+
+      // 2. Delivery during active overlap window (dual-signed with new + old)
+      const duringOverlapBundle = resolveSigningSecrets(
+        {
+          secretCiphertext: encryptSecret(newSecret),
+          previousSecretCiphertext: encryptSecret(oldSecret),
+          previousSecretExpiresAt: overlapExpires,
+          signatureVersion: 1,
+        },
+        new Date(t0.getTime() + 300_000),
+      );
+      expect(duringOverlapBundle.rotationActive).toBe(true);
+      expect(duringOverlapBundle.activeKeyId).toBe(newKid);
+      expect(duringOverlapBundle.previousKeyId).toBe(oldKid);
+      expect(duringOverlapBundle.keys.map((k) => k.id)).toEqual([newKid, oldKid]);
+
+      const overlapSigned = signPayloadWithKeyIds(
+        payload,
+        duringOverlapBundle.keys,
+        duringOverlapBundle.signatureVersion,
+        nowSec,
+      );
+      expect(overlapSigned.keyIdHeader).toBe(`${newKid},${oldKid}`);
+
+      // Consumer still on old key only succeeds
+      const oldOnlyCheck = verifySignatureWithDetails(
+        payload,
+        overlapSigned.signature,
+        { [oldKid]: oldSecret },
+        { keyIdHeader: overlapSigned.keyIdHeader, nowSec },
+      );
+      expect(oldOnlyCheck).toMatchObject({ valid: true, matchedKeyId: oldKid });
+
+      // Consumer already on new key only succeeds
+      const newOnlyCheck = verifySignatureWithDetails(
+        payload,
+        overlapSigned.signature,
+        { [newKid]: newSecret },
+        { keyIdHeader: overlapSigned.keyIdHeader, nowSec },
+      );
+      expect(newOnlyCheck).toMatchObject({ valid: true, matchedKeyId: newKid });
+
+      // 3. Exact expiry boundary (now === overlapExpires): previous key is omitted
+      const atExpiryBundle = resolveSigningSecrets(
+        {
+          secretCiphertext: encryptSecret(newSecret),
+          previousSecretCiphertext: encryptSecret(oldSecret),
+          previousSecretExpiresAt: overlapExpires,
+          signatureVersion: 1,
+        },
+        overlapExpires,
+      );
+      expect(atExpiryBundle.rotationActive).toBe(false);
+      expect(atExpiryBundle.activeKeyId).toBe(newKid);
+      expect(atExpiryBundle.previousKeyId).toBeNull();
+      expect(atExpiryBundle.keys.map((k) => k.id)).toEqual([newKid]);
+
+      const postOverlapSigned = signPayloadWithKeyIds(
+        payload,
+        atExpiryBundle.keys,
+        atExpiryBundle.signatureVersion,
+        nowSec,
+      );
+      expect(postOverlapSigned.keyIdHeader).toBe(newKid);
+
+      // Consumer still on old key only now fails with key_id_mismatch
+      const expiredOldCheck = verifySignatureWithDetails(
+        payload,
+        postOverlapSigned.signature,
+        { [oldKid]: oldSecret },
+        { keyIdHeader: postOverlapSigned.keyIdHeader, nowSec },
+      );
+      expect(expiredOldCheck).toMatchObject({
+        valid: false,
+        reason: "key_id_mismatch",
+      });
+    });
+
+    it("rejects tampered payloads and unknown key IDs", async () => {
+      const {
+        deriveSigningKeyId,
+        signPayloadWithKeyIds,
+        verifySignatureWithDetails,
+      } = await import("@/lib/webhooks/signing");
+
+      const secret = "whsec_tamper_check_secret_12345";
+      const kid = deriveSigningKeyId(secret);
+      const payload = JSON.stringify({ event: "revenue.recorded", amount: 100 });
+      const nowSec = 1_763_550_000;
+
+      const signed = signPayloadWithKeyIds(payload, [{ id: kid, secret }], 1, nowSec);
+
+      const tampered = verifySignatureWithDetails(
+        JSON.stringify({ event: "revenue.recorded", amount: 999 }),
+        signed.signature,
+        { [kid]: secret },
+        { keyIdHeader: signed.keyIdHeader, nowSec },
+      );
+      expect(tampered).toMatchObject({ valid: false, reason: "invalid_signature" });
+
+      const unknownKid = verifySignatureWithDetails(
+        payload,
+        signed.signature,
+        { [kid]: secret },
+        { keyIdHeader: "whkid_0000000000000000", nowSec },
+      );
+      expect(unknownKid).toMatchObject({ valid: false, reason: "key_id_mismatch" });
+    });
+  });
 });
