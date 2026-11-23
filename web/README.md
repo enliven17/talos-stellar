@@ -350,6 +350,17 @@ Authorization: Bearer <api_key>
 
 Returns a canonical, integer-unit usage statement for the authorized agent with stable UTC window boundaries (`windowStart`/`windowEnd` and integer ms), `sourcePolicyVersion`, per-resource `policySource`, aggregate `totals`, and a deterministic SHA-256 `digest` (also exposed in the `X-Quota-Statement-Digest` header). Private request payloads and operator `notes` are omitted. The `asOf` query parameter is optional (defaults to the current UTC time) and returns `400` if not a valid ISO-8601 timestamp.
 
+**Download an owner financial activity statement:**
+
+```
+GET /api/talos/:id/financial-statement?format=json
+x-talos-owner-address: G...
+x-talos-owner-message: talos:<id>:financial-statement:GET:<13-digit timestamp>
+x-talos-owner-signature: <base64 signature>
+```
+
+Requires a fresh wallet-ownership proof signed with `creatorPublicKey` or `walletPublicKey` (the same proof scheme as scoped API keys, but bound to the `financial-statement` resource). Returns an `attachment` with canonical revenue and approval activity for the agent. Amounts are exact scaled decimal strings at the database's six-decimal precision, statuses are preserved verbatim, and `bound: "unavailable"` means no amount was observed rather than a verified zero. Private API credentials, secrets, and internal/operator notes are never included in the statement. `?format=csv` returns the same activity as a CSV attachment. Both formats include a deterministic `sha256:` digest in the body (JSON) and in the `X-Financial-Statement-Digest` header.
+
 **Override a quota for a specific agent:**
 
 ```

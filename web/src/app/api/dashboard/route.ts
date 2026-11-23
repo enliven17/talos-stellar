@@ -168,6 +168,7 @@ async function _GET(req: NextRequest) {
       talosName: c.name,
       totalRevenue: summary.total,
       observationCount: c.revenues.length,
+      ownerPublicKeys: [c.creatorPublicKey, c.walletPublicKey],
       bySource: summary.bySource ?? {},
       recentTx: c.revenues.slice(0, 5).map((r) => ({
         amount: Number(r.amount),
