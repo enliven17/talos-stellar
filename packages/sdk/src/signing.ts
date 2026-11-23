@@ -108,6 +108,15 @@ const SIGNATURE_HEADERS = new Set([
   "x-talos-timestamp",
 ]);
 
+/** Encode a raw signature as standard base64 for the `X-Talos-Signature` header. */
+export function encodeSignature(signature: Uint8Array): string {
+  let binary = "";
+  for (const byte of signature) binary += String.fromCharCode(byte);
+  return typeof btoa === "function"
+    ? btoa(binary)
+    : Buffer.from(signature).toString("base64");
+}
+
 function base64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -116,6 +125,11 @@ function base64Url(bytes: Uint8Array): string {
       ? btoa(binary)
       : Buffer.from(bytes).toString("base64");
   return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Encode a signature Uint8Array as a base64 string for transport. */
+export function encodeSignature(signature: Uint8Array): string {
+  return base64Url(signature);
 }
 
 async function sha256(bytes: Uint8Array): Promise<Uint8Array> {

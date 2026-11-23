@@ -1,5 +1,10 @@
 """Commerce quote expiry enforcement and the x402 payment clock-skew policy.
 
+    (See tools/commerce.py for the #1446 unknown-payment-outcome gate: an
+    unknown x402 outcome is recorded by purchase_service and a repeat purchase
+    for the same payload returns the existing record instead of re-signing.)
+
+
 Mirrors the SDK ``verifyQuoteNotExpired`` contract for the Prime Agent so
 buyers never sign or submit payment against an expired (or malformed) quote.
 
@@ -43,6 +48,9 @@ policy for callers that take payments (see ``tools/commerce.py``).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -55,6 +63,8 @@ EXPIRED_QUOTE = "EXPIRED_QUOTE"
 INVALID_QUOTE = "INVALID_QUOTE"
 MISSING_QUOTE_EXPIRY = "MISSING_QUOTE_EXPIRY"
 INSUFFICIENT_VALIDITY = "INSUFFICIENT_VALIDITY"
+INVALID_QUOTE_RECEIPT = "INVALID_QUOTE_RECEIPT"
+QUOTE_RECEIPT_MISMATCH = "QUOTE_RECEIPT_MISMATCH"
 
 _DEFAULT_CLOCK: ClockProtocol = SystemClock()
 
@@ -293,6 +303,53 @@ def enforce_commerce_quote_expiry(
     }
 
 
+def quote_clock_policy_diagnostics(
+    payment_details: Mapping[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    clock: ClockProtocol | None = None,
+    policy: X402ClockSkewPolicy | None = None,
+) -> dict[str, Any]:
+    """Read-only diagnostics for the x402 clock-policy applied to a quote.
+
+    Calls :func:`enforce_commerce_quote_expiry` exactly once — the existing
+    verdict — so this module does not introduce a second expiry rule. The
+    additional fields below are display-only:
+
+    - ``max_clock_skew_secs`` / ``min_remaining_validity_secs`` — the configured
+      safety margin from ``policy`` (or ``None`` when no policy was supplied).
+    - ``remaining_validity_secs`` — ``expires_at - now`` as a float, or ``None``
+      when the quote has no parseable expiry. **Not clamped** to be
+      non-negative: a caller that wants to display "expired 12s ago" can.
+    - ``verdict`` — the ``code`` from the existing verdict (``None`` when safe).
+    - ``expires_at`` — the ISO expiry string, if present.
+
+    Never includes payment headers, signatures, seeds, or the quote body.
+    """
+    verdict = enforce_commerce_quote_expiry(
+        payment_details,
+        now=now,
+        clock=clock,
+        policy=policy,
+    )
+    raw_expiry = extract_quote_expires_at(payment_details)
+    expires_at = parse_iso8601_timestamp(raw_expiry)
+    if expires_at is not None:
+        now_utc = _now_utc(now, clock)
+        remaining = (expires_at - now_utc).total_seconds()
+    else:
+        remaining = None
+    return {
+        "verdict": verdict.get("code") if isinstance(verdict, Mapping) else None,
+        "expires_at": _expiry_iso(expires_at) if expires_at is not None else None,
+        "max_clock_skew_secs": policy.max_clock_skew_secs if policy is not None else None,
+        "min_remaining_validity_secs": (
+            policy.min_remaining_validity_secs if policy is not None else None
+        ),
+        "remaining_validity_secs": remaining,
+    }
+
+
 def quote_expiry_iso(payment_details: Mapping[str, Any] | None) -> str | None:
     """Return normalized UTC Zulu expiry string when parseable, else None."""
     raw = extract_quote_expires_at(payment_details)
@@ -300,3 +357,124 @@ def quote_expiry_iso(payment_details: Mapping[str, Any] | None) -> str | None:
     if dt is None:
         return None
     return _expiry_iso(dt)
+
+
+def canonical_request_digest(request: Any) -> str:
+    """Return a SHA-256 digest of JSON using stable key ordering and spacing."""
+    canonical = json.dumps(
+        request,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def normalize_stellar_network(network: object, *, default: object = "testnet") -> str | None:
+    """Normalize supported Stellar network labels to a chain-qualified value."""
+    value = network.strip().lower() if isinstance(network, str) else ""
+    if not value or value == "stellar":
+        value = default.strip().lower() if isinstance(default, str) else ""
+    if value in ("testnet", "stellar:testnet"):
+        return "stellar:testnet"
+    if value in ("mainnet", "stellar:mainnet"):
+        return "stellar:mainnet"
+    return None
+
+
+def create_quote_acceptance_receipt(
+    *,
+    seller_id: str,
+    payee: str,
+    service_type: str,
+    amount_units: int,
+    network: str,
+    request_digest: str,
+) -> dict[str, Any]:
+    """Create an integrity-checked receipt bound to one exact purchase request."""
+    binding = {
+        "version": 1,
+        "seller_id": seller_id,
+        "payee": payee,
+        "service_type": service_type,
+        "amount_units": amount_units,
+        "network": network,
+        "request_digest": request_digest,
+    }
+    return {
+        **binding,
+        "receipt_digest": canonical_request_digest(binding),
+    }
+
+
+def verify_quote_acceptance_receipt(
+    receipt: object,
+    *,
+    seller_id: str,
+    payee: str,
+    service_type: str,
+    amount_units: int,
+    network: str,
+    request_digest: str,
+) -> dict[str, Any] | None:
+    """Return a privacy-safe error if a receipt is invalid or for another request."""
+    if not isinstance(receipt, Mapping):
+        return {
+            "error": "Quote acceptance receipt must be an object",
+            "code": INVALID_QUOTE_RECEIPT,
+        }
+
+    expected = create_quote_acceptance_receipt(
+        seller_id=seller_id,
+        payee=payee,
+        service_type=service_type,
+        amount_units=amount_units,
+        network=network,
+        request_digest=request_digest,
+    )
+    if (
+        set(receipt) != set(expected)
+        or isinstance(receipt.get("version"), bool)
+        or receipt.get("version") != 1
+    ):
+        return {
+            "error": "Quote acceptance receipt is malformed",
+            "code": INVALID_QUOTE_RECEIPT,
+        }
+    for key in (
+        "seller_id",
+        "payee",
+        "service_type",
+        "amount_units",
+        "network",
+        "request_digest",
+    ):
+        value = receipt.get(key)
+        if key == "amount_units":
+            if isinstance(value, bool) or not isinstance(value, int):
+                return {
+                    "error": "Quote acceptance receipt is malformed",
+                    "code": INVALID_QUOTE_RECEIPT,
+                }
+        elif not isinstance(value, str):
+            return {
+                "error": "Quote acceptance receipt is malformed",
+                "code": INVALID_QUOTE_RECEIPT,
+            }
+
+    if any(receipt.get(key) != expected[key] for key in expected if key != "receipt_digest"):
+        return {
+            "error": "Quote acceptance receipt does not match this purchase",
+            "code": QUOTE_RECEIPT_MISMATCH,
+        }
+
+    supplied_digest = receipt.get("receipt_digest")
+    if not isinstance(supplied_digest, str) or not hmac.compare_digest(
+        supplied_digest, expected["receipt_digest"]
+    ):
+        return {
+            "error": "Quote acceptance receipt integrity check failed",
+            "code": INVALID_QUOTE_RECEIPT,
+        }
+    return None

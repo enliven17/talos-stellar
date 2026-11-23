@@ -18,6 +18,8 @@ pub(crate) mod timelock;
 pub(crate) mod ttl;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod registry_migration_manifest;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod registry_schema_fixtures;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod registry_schema_tests;
@@ -202,6 +204,7 @@ pub enum DataKey {
     PauseState(PauseDomain),
     PauseController(u32),
     ResumeController(u32),
+    TalosRevision(u32), // talos_id → metadata revision counter (u32)
 }
 
 /// A portable, offline-verifiable binding of a Talos agent identity.
@@ -389,6 +392,31 @@ fn emit_talos_resumed(env: &Env, talos_id: u32, controller: Address) {
     env.events().publish(topics, controller);
 }
 
+/// Emitted after every successful metadata mutation (update_patron, update_kernel,
+/// update_pulse). Binds the change to its predecessor revision so off-chain
+/// indexers can order edits without duplicating private state.
+///
+/// Event schema: topics (`meta_rev`, talos_id: u32) → data (prev_revision: u32, new_revision: u32)
+fn emit_metadata_revised(env: &Env, talos_id: u32, prev_revision: u32, new_revision: u32) {
+    let topics = (symbol_short!("meta_rev"), talos_id);
+    env.events().publish(topics, (prev_revision, new_revision));
+}
+
+/// Increment the per-talos revision counter and return (prev, new).
+/// Starts at 0 implicitly; first call returns (0, 1).
+fn increment_talos_revision(e: &Env, talos_id: u32) -> (u32, u32) {
+    let prev: u32 = e
+        .storage()
+        .persistent()
+        .get(&DataKey::TalosRevision(talos_id))
+        .unwrap_or(0);
+    let next = prev + 1;
+    e.storage()
+        .persistent()
+        .set(&DataKey::TalosRevision(talos_id), &next);
+    (prev, next)
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn validate_patron_shares(env: &Env, patron: &Patron) {
@@ -537,6 +565,11 @@ pub const SCHEMA_LATEST: u32 = SCHEMA_TIMELOCK_DEFAULTS;
 /// `rollback_schema` may only move the version pointer back this many steps.
 const MAX_ROLLBACK_DEPTH: u32 = 1;
 
+/// Version of the TalosRegistry storage-key migration compatibility manifest
+/// published by this WASM. Matches `spec_version` in
+/// `contracts/fixtures/registry_schema/migration_manifest/manifest.json`.
+const MIGRATION_KEY_MANIFEST_VERSION: u32 = 1;
+
 /// Compile-time interface version of TalosRegistry.
 ///
 /// Format: `(major, minor, patch)` following Semantic Versioning.
@@ -680,12 +713,32 @@ impl TalosRegistry {
 
         emit_talos_created(&e, next_id, talos.creator.clone(), name, talos.category.clone());
 
+        // Initialise revision to 1 for this talos.
+        e.storage()
+            .persistent()
+            .set(&DataKey::TalosRevision(next_id), &1u32);
+
         next_id
     }
 
     /// Get Talos by ID.
     pub fn get_talos(e: Env, talos_id: u32) -> Option<Talos> {
         e.storage().persistent().get(&DataKey::Talos(talos_id))
+    }
+
+    /// Return the current metadata revision counter for a Talos.
+    ///
+    /// The revision starts at 1 when the Talos is created and increments by 1
+    /// on every successful call to `update_patron`, `update_kernel`, or
+    /// `update_pulse`. Off-chain indexers can compare the revision they cached
+    /// with the on-chain value to detect a stale metadata view without
+    /// fetching the full record.
+    ///
+    /// Returns `None` if the Talos does not exist.
+    pub fn get_talos_revision(e: Env, talos_id: u32) -> Option<u32> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TalosRevision(talos_id))
     }
 
     /// Get the creator address of a Talos.
@@ -753,6 +806,9 @@ impl TalosRegistry {
             .set(&DataKey::Talos(talos_id), &talos);
 
         emit_patron_updated(&e, talos_id, &patron);
+
+        let (prev_rev, new_rev) = increment_talos_revision(&e, talos_id);
+        emit_metadata_revised(&e, talos_id, prev_rev, new_rev);
     }
 
     /// Update kernel policy for a Talos.
@@ -770,6 +826,9 @@ impl TalosRegistry {
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
+
+        let (prev_rev, new_rev) = increment_talos_revision(&e, talos_id);
+        emit_metadata_revised(&e, talos_id, prev_rev, new_rev);
     }
 
     /// Update pulse token config for a Talos.
@@ -1601,6 +1660,19 @@ impl TalosRegistry {
     /// Fetch a single migration/rollback history entry, oldest first.
     pub fn migration_record_at(e: Env, index: u32) -> Option<storage_migration::MigrationRecord> {
         storage_migration::migration_record_at(&e, index)
+    }
+
+    /// Publish the version of the registry storage-key migration compatibility
+    /// manifest that this WASM implements.
+    ///
+    /// Off-chain tooling reads this stable marker to select the correct old →
+    /// new `DataKey` mapping (see `contracts/fixtures/registry_schema/
+    /// migration_manifest/manifest.json`). Bumping it is a minor,
+    /// backwards-compatible change: a higher version only adds mapping rows.
+    ///
+    /// Read-only — requires no authorization and performs no ledger writes.
+    pub fn migration_key_manifest_version(_e: Env) -> u32 {
+        MIGRATION_KEY_MANIFEST_VERSION
     }
 }
 

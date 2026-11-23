@@ -17,9 +17,10 @@
 
 import { eq, and, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { tlsCommerceJobs, tlsTokenPurchases } from "@/db/schema";
+import { tlsCommerceJobs, tlsStellarTxRecords, tlsTokenPurchases } from "@/db/schema";
 import { logger } from "@/lib/logger";
-import type { TxRecord, RepairOutcome } from "./types";
+import { canCreditJob, formatAssociationConflictError } from "./state-machine";
+import type { TxAssociation, TxRecord, RepairOutcome } from "./types";
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
@@ -68,6 +69,44 @@ async function repairCommerceJob(record: TxRecord): Promise<RepairOutcome> {
 
   try {
     if (finalityStatus === "CONFIRMED") {
+      // Before crediting/confirming the job, verify that this payment identity
+      // (txHash) is not associated with an incompatible commerce job.
+      const associatedJobs = await db
+        .select({ id: tlsCommerceJobs.id })
+        .from(tlsCommerceJobs)
+        .where(eq(tlsCommerceJobs.txHash, record.txHash));
+
+      const existingAssociations: TxAssociation[] = associatedJobs.map((row) => ({
+        txHash: record.txHash,
+        sourceType: "commerce_job",
+        sourceId: row.id,
+      }));
+
+      const creditDecision = canCreditJob(record, existingAssociations);
+      if (!creditDecision.allowed) {
+        if (creditDecision.conflict) {
+          await db
+            .update(tlsStellarTxRecords)
+            .set({
+              lastError: formatAssociationConflictError(creditDecision.conflict),
+              updatedAt: new Date(),
+            })
+            .where(eq(tlsStellarTxRecords.id, record.id));
+
+          logger.warn(
+            {
+              jobId,
+              txHash: record.txHash,
+              existingSourceId: creditDecision.conflict.existingSourceId,
+              incomingSourceId: creditDecision.conflict.incomingSourceId,
+            },
+            "reconciler_job_association_conflict",
+          );
+        }
+
+        return { ok: false, error: creditDecision.reason };
+      }
+
       // Tx confirmed — the job payment is settled.  Jobs start in "pending"
       // which means the agent has not fulfilled yet; we do not need to change
       // anything.  If someone already set it to "completed" or "failed",
@@ -195,4 +234,75 @@ async function repairTokenPurchase(record: TxRecord): Promise<RepairOutcome> {
     logger.error({ txHash, err }, "reconciler_token_purchase_repair_error");
     return { ok: false, error: message };
   }
+}
+
+// ─── Revision-guarded repair (operator-triggered) ─────────────────────────────
+
+/**
+ * Apply downstream repair for `record` and atomically flip `repairApplied`
+ * on the tx record — but only if the record has not been updated since the
+ * caller observed it (optimistic concurrency via `updatedAt`).
+ *
+ * This is the entry point for operator-triggered repair actions. It prevents
+ * a stale repair action from overwriting newer state: if another process
+ * (the background reconciler, a concurrent operator request) has written
+ * to this row since the caller loaded it, the `UPDATE … WHERE updated_at =
+ * :observed` guard matches 0 rows and this function returns
+ * `{ ok: false, stale: true }` without touching any downstream rows.
+ *
+ * Usage
+ * ─────
+ *   const record = await loadTxRecord(id);          // operator observes record
+ *   // …operator decides to trigger repair…
+ *   const result = await applyRepairWithRevisionGuard(record);
+ *   if (!result.ok && result.stale) {
+ *     // The record changed between observation and action — reload and retry
+ *   }
+ */
+export async function applyRepairWithRevisionGuard(
+  record: TxRecord,
+): Promise<RepairOutcome> {
+  // 1. Apply the downstream repair (idempotent — safe to call even if the guard
+  //    later fails; the downstream update's own WHERE clause makes it a no-op
+  //    if it already ran).
+  const repairResult = await applyRepair(record);
+
+  if (!repairResult.ok) {
+    // Downstream repair itself failed — surface the error without touching
+    // the tx record.
+    return repairResult;
+  }
+
+  // 2. Atomically flip repairApplied=true on the tx record, but only if
+  //    updatedAt still matches what the caller observed. If another writer
+  //    beat us here the guard rejects the action.
+  const [flipped] = await db
+    .update(tlsStellarTxRecords)
+    .set({ repairApplied: true, updatedAt: new Date() })
+    .where(
+      and(
+        eq(tlsStellarTxRecords.id, record.id),
+        eq(tlsStellarTxRecords.updatedAt, record.updatedAt),
+      ),
+    )
+    .returning({ id: tlsStellarTxRecords.id });
+
+  if (!flipped) {
+    logger.warn(
+      { txHash: record.txHash, sourceType: record.sourceType, observedUpdatedAt: record.updatedAt },
+      "reconciler_repair_stale_revision",
+    );
+    return {
+      ok: false,
+      error: "Repair rejected: record was updated after it was observed (stale revision)",
+      stale: true,
+    };
+  }
+
+  logger.info(
+    { txHash: record.txHash, sourceType: record.sourceType, detail: repairResult.detail },
+    "reconciler_repair_applied_with_revision_guard",
+  );
+
+  return repairResult;
 }
