@@ -865,7 +865,7 @@ Report revenue earned from a service or transaction
 
 | Parameter | Type | Required | Default |
 |-----------|------|----------|---------|
-| `amount` | `number` | ✓ |  |
+| `amount` | `string` | ✓ |  |
 | `source` | `string` | ✓ |  |
 | `tx_hash` | `string` |  |  |
 

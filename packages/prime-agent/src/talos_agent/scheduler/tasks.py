@@ -156,7 +156,9 @@ async def agent_cycle_task(
                 # Hot-reload policies if the file changed
                 if policy_engine.enabled:
                     if policy_middleware.hot_reload():
-                        console.print("[cyan]Policy engine: policies reloaded (file change detected).[/cyan]")
+                        console.print(
+                            "[cyan]Policy engine: policies reloaded (file change detected).[/cyan]"
+                        )
 
                 if not await ensure_browser_healthy():
                     console.print(
@@ -176,6 +178,7 @@ async def agent_cycle_task(
                     replay_recorder = None
                     if settings.replay_enabled:
                         from talos_agent.replay import ReplayRecorder
+
                         replay_recorder = ReplayRecorder(
                             session_id=cycle_id,
                             db=db,
@@ -225,6 +228,7 @@ async def agent_cycle_task(
                 if settings.replay_enabled:
                     try:
                         from talos_agent.replay import ReplayRecorder
+
                         err_recorder = ReplayRecorder(
                             session_id=cycle_id,
                             db=db,
@@ -241,13 +245,16 @@ async def agent_cycle_task(
 
                 try:
                     import sentry_sdk
+
                     sentry_sdk.capture_exception(e)
                 except Exception:
                     pass
             finally:
                 structlog.contextvars.unbind_contextvars("cycle_id")
         try:
-            await asyncio.wait_for(shutdown_event.wait(), timeout=settings.agent_cycle_interval)
+            await asyncio.wait_for(
+                shutdown_event.wait(), timeout=settings.agent_cycle_interval
+            )
             break
         except asyncio.TimeoutError:
             pass
@@ -292,24 +299,25 @@ async def polling_task(
                                 a.get("amount"),
                             )
 
-                jobs = await api.get_pending_jobs()
-                for job in jobs:
-                    if job_effect_store is not None:
-                        try:
-                            job_effect_store.ingest(job)
-                        except Exception as exc:
-                            from talos_agent.job_effects import JobEffectError
-                            if isinstance(exc, JobEffectError):
-                                log.warning("job_inbox_rejected", error_code=exc.code)
-                                continue
-                            raise
-                    else:
-                        db.add_commerce_job(
-                            job["id"],
-                            job["talosId"],
-                            job.get("serviceName", ""),
-                            job.get("payload"),
-                        )
+            jobs = await api.get_pending_jobs()
+            for job in jobs:
+                if job_effect_store is not None:
+                    try:
+                        job_effect_store.ingest(job)
+                    except Exception as exc:
+                        from talos_agent.job_effects import JobEffectError
+
+                        if isinstance(exc, JobEffectError):
+                            log.warning("job_inbox_rejected", error_code=exc.code)
+                            continue
+                        raise
+                else:
+                    db.add_commerce_job(
+                        job["id"],
+                        job["talosId"],
+                        job.get("serviceName", ""),
+                        job.get("payload"),
+                    )
 
                 jobs = await api.get_pending_jobs()
                 for job in jobs:
@@ -495,14 +503,13 @@ async def activity_flush_task(
                         )
                     db.mark_activities_sent([a["id"] for a in pending])
             backoff.success()
-        except asyncio.CancelledError:
-            # Cancellation is not a failed attempt — never consume retry budget.
-            raise
         except Exception as e:
             logger.debug(f"Activity flush error: {e}")
-            backoff.failure(e)
+            backoff.failure()
             if backoff.terminal:
-                logger.warning("activity_flush_task: reached max_attempts — stopping task")
+                logger.warning(
+                    "activity_flush_task: reached max_attempts — stopping task"
+                )
                 break
             try:
                 with _traced_task_run("activity_flush", talos_config):
@@ -568,7 +575,9 @@ async def learning_cycle_task(
                 break
 
             if not await ensure_browser_healthy():
-                console.print("[red]Skipping learning cycle: browser session is down and unrecoverable.[/red]")
+                console.print(
+                    "[red]Skipping learning cycle: browser session is down and unrecoverable.[/red]"
+                )
             else:
                 try:
                     with _traced_task_run("learning_cycle", talos_config):
@@ -576,9 +585,16 @@ async def learning_cycle_task(
                             db, talos_config, clock=effective_clock
                         )
 
-                        if context.unmeasured_count > 0 or context.performance_summary.get("total_posts", 0) >= 5:
-                            console.print("[bold magenta]Starting learning cycle...[/bold magenta]")
-                            learning_prompt = build_learning_prompt(talos_config, context)
+                        if (
+                            context.unmeasured_count > 0
+                            or context.performance_summary.get("total_posts", 0) >= 5
+                        ):
+                            console.print(
+                                "[bold magenta]Starting learning cycle...[/bold magenta]"
+                            )
+                            learning_prompt = build_learning_prompt(
+                                talos_config, context
+                            )
                             await agent_loop(
                                 settings=settings,
                                 tools=tools,
@@ -589,7 +605,9 @@ async def learning_cycle_task(
                                 shutdown_event=shutdown_event,
                             )
                             db.update_schedule("learning_cycle")
-                            console.print("[bold magenta]Learning cycle complete.[/bold magenta]")
+                            console.print(
+                                "[bold magenta]Learning cycle complete.[/bold magenta]"
+                            )
                 except Exception as e:
                     console.print(f"[red]Learning cycle error: {e}[/red]")
         try:
@@ -715,17 +733,34 @@ async def dividend_distribution_task(
                                 db=db,
                             )
 
-                    _RESULT_MESSAGES = {
-                        "no_wallet": ("[dim yellow]", "No wallet public key configured — skipping dividend distribution"),
-                        "missing_creator": ("[bold red]", "No creator public key configured — aborting dividend distribution"),
-                        "balance_error": ("[bold red]", "USDC balance check failed — skipping dividend distribution"),
-                        "below_threshold": ("[dim]", f"USDC balance below threshold {settings.dividend_usdc_threshold} — skipping"),
-                        "preview_failed": ("[bold red]", "Distribution preview failed — aborting"),
-                        "distribution_failed": ("[bold red]", "Dividend distribution failed"),
-                        "success": ("[bold green]", "Dividend distribution successful"),
-                    }
-                    color, msg = _RESULT_MESSAGES.get(result, ("[dim]", f"Unknown result: {result}"))
-                    console.print(f"{color}{msg}[/]")
+            _RESULT_MESSAGES = {
+                "no_wallet": (
+                    "[dim yellow]",
+                    "No wallet public key configured — skipping dividend distribution",
+                ),
+                "missing_creator": (
+                    "[bold red]",
+                    "No creator public key configured — aborting dividend distribution",
+                ),
+                "balance_error": (
+                    "[bold red]",
+                    "USDC balance check failed — skipping dividend distribution",
+                ),
+                "below_threshold": (
+                    "[dim]",
+                    f"USDC balance below threshold {settings.dividend_usdc_threshold} — skipping",
+                ),
+                "preview_failed": (
+                    "[bold red]",
+                    "Distribution preview failed — aborting",
+                ),
+                "distribution_failed": ("[bold red]", "Dividend distribution failed"),
+                "success": ("[bold green]", "Dividend distribution successful"),
+            }
+            color, msg = _RESULT_MESSAGES.get(
+                result, ("[dim]", f"Unknown result: {result}")
+            )
+            console.print(f"{color}{msg}[/]")
 
         except Exception as e:
             console.print(f"[red]Dividend distribution task error: {e}[/red]")
@@ -839,30 +874,38 @@ async def telemetry_log_task(
                 except Exception as _ah_exc:
                     logger.debug("Telemetry adapter health probe failed: %s", _ah_exc)
 
-                log.info(
-                    "telemetry_snapshot",
-                    tasks=[
-                        {"name": t.name, "last_run": t.last_run_at, "retries": t.retry_attempts}
-                        for t in report.tasks
-                    ],
-                    queues=[
-                        {"name": q.name, "pending": q.pending_count, "total": q.total_count}
-                        for q in report.queues
-                    ],
-                    posts_7d=report.total_posts_7d,
-                    impressions_7d=report.total_impressions_7d,
-                    circuit_breakers=[
-                        {"provider": c.get("provider"), "state": c.get("state")}
-                        for c in report.circuit_breakers
-                    ],
-                    adapters=[
-                        {"name": a.name, "state": a.state, "error_category": a.error_category}
-                        for a in report.adapters
-                    ],
-                    policy_evaluations=report.policy_evaluation_count,
-                )
-            except Exception as _tel_exc:
-                logger.debug("Telemetry snapshot failed: %s", _tel_exc)
+            log.info(
+                "telemetry_snapshot",
+                tasks=[
+                    {
+                        "name": t.name,
+                        "last_run": t.last_run_at,
+                        "retries": t.retry_attempts,
+                    }
+                    for t in report.tasks
+                ],
+                queues=[
+                    {"name": q.name, "pending": q.pending_count, "total": q.total_count}
+                    for q in report.queues
+                ],
+                posts_7d=report.total_posts_7d,
+                impressions_7d=report.total_impressions_7d,
+                circuit_breakers=[
+                    {"provider": c.get("provider"), "state": c.get("state")}
+                    for c in report.circuit_breakers
+                ],
+                adapters=[
+                    {
+                        "name": a.name,
+                        "state": a.state,
+                        "error_category": a.error_category,
+                    }
+                    for a in report.adapters
+                ],
+                policy_evaluations=report.policy_evaluation_count,
+            )
+        except Exception as _tel_exc:
+            logger.debug("Telemetry snapshot failed: %s", _tel_exc)
 
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=telemetry_interval)

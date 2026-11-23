@@ -5,6 +5,7 @@ degrades to a documented no-op so existing behavior, log shape, and
 performance are unchanged unless an operator opts in. See
 ``docs/TRACING.md`` for the full design.
 """
+
 from __future__ import annotations
 
 import os

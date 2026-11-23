@@ -95,7 +95,7 @@ def decrypt_with_password(blob_text: str, password: str) -> bytes:
         raise ValueError("Not an encrypted blob")
 
     try:
-        b = base64.b64decode(blob_text[len(PREFIX):])
+        b = base64.b64decode(blob_text[len(PREFIX) :])
     except Exception:
         raise ValueError("Invalid encrypted blob")
 
@@ -108,7 +108,7 @@ def decrypt_with_password(blob_text: str, password: str) -> bytes:
         raise ValueError(f"Unsupported envelope version: {version}")
 
     # Parse salt and nonce
-    salt = b[1:1 + SALT_SIZE]
+    salt = b[1 : 1 + SALT_SIZE]
     nonce = b[1 + SALT_SIZE : 1 + SALT_SIZE + NONCE_SIZE]
     ct_with_tag = b[1 + SALT_SIZE + NONCE_SIZE :]
 

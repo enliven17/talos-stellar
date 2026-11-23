@@ -25,7 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities
-from talos_agent.adapters.registry import AdapterCapabilityConflictError, AdapterRegistry
+from talos_agent.adapters.registry import AdapterRegistry
 
 
 # ── Minimal stub adapter ─────────────────────────────────────────────────────

@@ -55,13 +55,13 @@ class WalHealthReport:
     checkpoint_checkpointed: int | None = None
     integrity: str | None = None
     findings: list[str] = field(default_factory=list)
-    checked_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "state": self.state.value if isinstance(self.state, enum.Enum) else str(self.state),
+            "state": self.state.value
+            if isinstance(self.state, enum.Enum)
+            else str(self.state),
             "detail": self.detail,
             "db_basename": self.db_basename,
             "journal_mode": self.journal_mode,
@@ -218,10 +218,13 @@ def collect_wal_health(
     integrity: str | None = None
 
     try:
+
         def _read_core() -> None:
             nonlocal journal_mode, wal_autocheckpoint, busy_timeout_ms
             nonlocal synchronous, page_count, page_size, freelist_count
-            journal_mode = str(_pragma_scalar(conn, "journal_mode") or "").lower() or None
+            journal_mode = (
+                str(_pragma_scalar(conn, "journal_mode") or "").lower() or None
+            )
             wal_autocheckpoint = _pragma_scalar(conn, "wal_autocheckpoint")
             busy_timeout_ms = _pragma_scalar(conn, "busy_timeout")
             sync_val = _pragma_scalar(conn, "synchronous")
@@ -254,6 +257,7 @@ def collect_wal_health(
 
     if run_checkpoint and journal_mode == "wal":
         try:
+
             def _checkpoint() -> None:
                 nonlocal checkpoint_busy, checkpoint_log, checkpoint_checkpointed
                 row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
@@ -269,6 +273,7 @@ def collect_wal_health(
 
     if run_quick_check:
         try:
+
             def _quick() -> None:
                 nonlocal integrity
                 row = conn.execute("PRAGMA quick_check(1)").fetchone()
@@ -320,7 +325,9 @@ def collect_wal_health(
     elif journal_mode != "wal":
         state = WalHealthState.DEGRADED
         detail = f"Expected journal_mode=wal, got {journal_mode or 'unknown'}"
-    elif "checkpoint_failed" in " ".join(findings) or "quick_check_failed" in " ".join(findings):
+    elif "checkpoint_failed" in " ".join(findings) or "quick_check_failed" in " ".join(
+        findings
+    ):
         state = WalHealthState.DEGRADED
         detail = "WAL mode active but one or more probes failed"
     elif "wal_size_large" in findings or "checkpoint_lag" in findings:
@@ -342,7 +349,9 @@ def collect_wal_health(
         detail=detail,
         db_basename=basename,
         journal_mode=journal_mode,
-        wal_autocheckpoint=int(wal_autocheckpoint) if wal_autocheckpoint is not None else None,
+        wal_autocheckpoint=int(wal_autocheckpoint)
+        if wal_autocheckpoint is not None
+        else None,
         busy_timeout_ms=int(busy_timeout_ms) if busy_timeout_ms is not None else None,
         synchronous=synchronous,
         page_count=int(page_count) if page_count is not None else None,

@@ -35,6 +35,7 @@ __all__ = [
     # Config
     "APP_DIR",
     # Façade
+    "APP_DIR",
     "LocalDB",
     # Migrations
     "DB_PATH",

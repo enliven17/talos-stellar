@@ -15,7 +15,9 @@ class CommerceRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def add_commerce_job(self, job_id: str, talos_id: str, service_type: str, payload: dict | None = None) -> None:
+    def add_commerce_job(
+        self, job_id: str, talos_id: str, service_type: str, payload: dict | None = None
+    ) -> None:
         self._conn.execute(
             "INSERT OR IGNORE INTO commerce_queue (job_id, talos_id, service_type, payload) VALUES (?, ?, ?, ?)",
             (job_id, talos_id, service_type, json.dumps(payload) if payload else None),

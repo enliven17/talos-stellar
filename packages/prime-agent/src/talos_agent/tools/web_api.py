@@ -12,14 +12,16 @@ if TYPE_CHECKING:
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.config import Settings
 
-VALID_ACTIVITY_TYPES = frozenset({
-    "post",
-    "research",
-    "reply",
-    "engagement",
-    "commerce",
-    "approval",
-})
+VALID_ACTIVITY_TYPES = frozenset(
+    {
+        "post",
+        "research",
+        "reply",
+        "engagement",
+        "commerce",
+        "approval",
+    }
+)
 
 _TX_HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -78,4 +80,4 @@ async def report_revenue(amount: float, source: str, tx_hash: str = "") -> dict:
     )
     if result:
         return result
-    return {"status": "reported", "amount": formatted_amount}
+    return {"status": "reported", "amount": amount}

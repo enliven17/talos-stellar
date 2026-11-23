@@ -173,7 +173,11 @@ class DurableBackoff:
                 terminal=self._terminal,
             )
         except Exception as exc:
-            logger.warning("DurableBackoff: failed to persist state for %s: %s", self.task_name, exc)
+            logger.warning(
+                "DurableBackoff: failed to persist state for %s: %s",
+                self.task_name,
+                exc,
+            )
 
     # ── Public API ─────────────────────────────────────────
 
@@ -237,7 +241,9 @@ class DurableBackoff:
         try:
             self._db.clear_retry_state(self.task_name)
         except Exception as exc:
-            logger.warning("DurableBackoff: failed to clear state for %s: %s", self.task_name, exc)
+            logger.warning(
+                "DurableBackoff: failed to clear state for %s: %s", self.task_name, exc
+            )
 
     def failure(
         self,

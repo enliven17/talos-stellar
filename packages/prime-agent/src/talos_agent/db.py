@@ -7,6 +7,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from talos_agent.config import APP_DIR
 
@@ -38,6 +39,7 @@ def normalize_playbook_name(name: str) -> str:
         raise ValueError("Playbook name contains invalid control characters")
 
     return normalized_name
+
 
 _MIGRATIONS = [
     (
@@ -560,18 +562,10 @@ CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     (
         14,
         """
-CREATE TABLE IF NOT EXISTS task_failure_history (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    talos_id         TEXT NOT NULL DEFAULT '',
-    task_name        TEXT NOT NULL,
-    attempt_number   INTEGER NOT NULL,
-    error_code       TEXT NOT NULL,
-    next_eligible_at TEXT NOT NULL,
-    recorded_at      TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_task_failure_history_lookup
-    ON task_failure_history(talos_id, task_name, recorded_at DESC);
+ALTER TABLE approval_cache ADD COLUMN action_digest TEXT;
+ALTER TABLE approval_cache ADD COLUMN policy_digest TEXT;
+ALTER TABLE approval_cache ADD COLUMN canonical_action TEXT;
+ALTER TABLE approval_cache ADD COLUMN simulated_result_digest TEXT;
         """,
     ),
 ]
@@ -734,7 +728,9 @@ class LocalDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_recent_content_by_channel(self, channel: str, limit: int = 20) -> list[dict]:
+    def get_recent_content_by_channel(
+        self, channel: str, limit: int = 20
+    ) -> list[dict]:
         rows = self._conn.execute(
             "SELECT content, channel, posted_at FROM content_history "
             "WHERE channel = ? ORDER BY posted_at DESC LIMIT ?",
@@ -744,7 +740,9 @@ class LocalDB:
 
     # ── Commerce Queue ─────────────────────────────────────
 
-    def add_commerce_job(self, job_id: str, talos_id: str, service_type: str, payload: dict | None = None) -> None:
+    def add_commerce_job(
+        self, job_id: str, talos_id: str, service_type: str, payload: dict | None = None
+    ) -> None:
         self._conn.execute(
             "INSERT OR IGNORE INTO commerce_queue (job_id, talos_id, service_type, payload) VALUES (?, ?, ?, ?)",
             (job_id, talos_id, service_type, json.dumps(payload) if payload else None),
@@ -766,12 +764,115 @@ class LocalDB:
 
     # ── Approval Cache ─────────────────────────────────────
 
-    def cache_approval(self, approval_id: str, type_: str, title: str, description: str | None, amount: float | None) -> None:
+    def cache_approval(
+        self,
+        approval_id: str,
+        type_: str,
+        title: str,
+        description: str | None,
+        amount: float | None,
+        action_digest: str | None = None,
+        policy_digest: str | None = None,
+        canonical_action: str | None = None,
+        simulated_result_digest: str | None = None,
+    ) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO approval_cache (approval_id, type, title, description, amount) VALUES (?, ?, ?, ?, ?)",
-            (approval_id, type_, title, description, amount),
+            "INSERT OR REPLACE INTO approval_cache "
+            "(approval_id, type, title, description, amount, action_digest, policy_digest, canonical_action, simulated_result_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                approval_id,
+                type_,
+                title,
+                description,
+                amount,
+                action_digest,
+                policy_digest,
+                canonical_action,
+                simulated_result_digest,
+            ),
         )
         self._conn.commit()
+
+    def get_approval(self, approval_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM approval_cache WHERE approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_policy_approval(self, approval: Any) -> None:
+        canonical_str = json.dumps(
+            {
+                "action": approval.action,
+                "params": approval.params,
+                "context": approval.context,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        amount = None
+        if isinstance(approval.params, dict) and "amount" in approval.params:
+            try:
+                amount = float(approval.params["amount"])
+            except (ValueError, TypeError):
+                pass
+        self._conn.execute(
+            "INSERT OR REPLACE INTO approval_cache "
+            "(approval_id, type, title, description, amount, status, action_digest, policy_digest, canonical_action, simulated_result_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                approval.approval_id,
+                "policy_approval",
+                f"Policy approval: {approval.action}",
+                approval.reason or f"Action {approval.action}",
+                amount,
+                approval.status,
+                approval.action_digest,
+                approval.policy_digest,
+                canonical_str,
+                approval.simulated_result_digest,
+            ),
+        )
+        self._conn.commit()
+
+    def get_policy_approval(self, approval_id: str) -> Any | None:
+        from talos_agent.policy.schema import PolicyApproval, PolicyDecision
+
+        row = self._conn.execute(
+            "SELECT * FROM approval_cache WHERE approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+        if not row:
+            return None
+        r = dict(row)
+        params: dict[str, Any] = {}
+        context: dict[str, Any] = {}
+        action_name = ""
+        if r.get("canonical_action"):
+            try:
+                parsed = json.loads(r["canonical_action"])
+                if isinstance(parsed, dict):
+                    action_name = parsed.get("action", "")
+                    params = parsed.get("params", {})
+                    context = parsed.get("context", {})
+            except Exception:
+                pass
+        return PolicyApproval(
+            approval_id=r["approval_id"],
+            action=action_name,
+            params=params,
+            context=context,
+            action_digest=r.get("action_digest") or "",
+            policy_digest=r.get("policy_digest") or "",
+            simulated_result_digest=r.get("simulated_result_digest") or "",
+            decision=PolicyDecision.APPROVE,
+            status=r.get("status", "pending"),
+            created_at=r.get("created_at") or "",
+            approved_at=r.get("updated_at") if r.get("status") == "approved" else None,
+            reason=r.get("description") or "",
+        )
 
     def get_pending_approvals(self) -> list[dict]:
         rows = self._conn.execute(
@@ -797,7 +898,9 @@ class LocalDB:
         self._conn.commit()
 
     def get_config(self, key: str) -> str | None:
-        row = self._conn.execute("SELECT value FROM talos_config WHERE key = ?", (key,)).fetchone()
+        row = self._conn.execute(
+            "SELECT value FROM talos_config WHERE key = ?", (key,)
+        ).fetchone()
         return row["value"] if row else None
 
     def set_talos_config(self, data: dict) -> None:
@@ -809,7 +912,9 @@ class LocalDB:
 
     # ── Playbooks ──────────────────────────────────────────
 
-    def save_playbook(self, name: str, data: dict, source_talos: str | None = None) -> None:
+    def save_playbook(
+        self, name: str, data: dict, source_talos: str | None = None
+    ) -> None:
         self._conn.execute(
             "INSERT INTO playbooks (name, data, source_talos) VALUES (?, ?, ?)",
             (name, json.dumps(data), source_talos),
@@ -841,12 +946,20 @@ class LocalDB:
 
     def apply_playbook(self, playbook_id: int) -> None:
         self._conn.execute("UPDATE playbooks SET applied = 0")
-        self._conn.execute("UPDATE playbooks SET applied = 1 WHERE id = ?", (playbook_id,))
+        self._conn.execute(
+            "UPDATE playbooks SET applied = 1 WHERE id = ?", (playbook_id,)
+        )
         self._conn.commit()
 
     # ── Spending Tracker ────────────────────────────────────
 
-    def record_spending(self, amount: float, category: str, description: str = "", currency: str = "USDC") -> None:
+    def record_spending(
+        self,
+        amount: float,
+        category: str,
+        description: str = "",
+        currency: str = "USDC",
+    ) -> None:
         self._conn.execute(
             "INSERT INTO spending_log (amount, currency, category, description) VALUES (?, ?, ?, ?)",
             (amount, currency, category, description),
@@ -1043,7 +1156,10 @@ class LocalDB:
             "WHERE expires_at IS NOT NULL AND expires_at <= ?",
             (cutoff,),
         ).fetchall()
-        ids = [int(r["id"] if isinstance(r, dict) or hasattr(r, "keys") else r[0]) for r in rows]
+        ids = [
+            int(r["id"] if isinstance(r, dict) or hasattr(r, "keys") else r[0])
+            for r in rows
+        ]
         if ids:
             self._conn.execute(
                 f"DELETE FROM strategy_learnings WHERE id IN ({','.join('?' for _ in ids)})",
@@ -1069,7 +1185,12 @@ class LocalDB:
             "engagement_score = excluded.engagement_score, "
             "keywords = excluded.keywords, "
             "updated_at = datetime('now')",
-            (segment, description, engagement_score, json.dumps(keywords) if keywords else None),
+            (
+                segment,
+                description,
+                engagement_score,
+                json.dumps(keywords) if keywords else None,
+            ),
         )
         self._conn.commit()
 
@@ -1104,12 +1225,22 @@ class LocalDB:
             """INSERT INTO dividends_log
                (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note),
+            (
+                spending_log_id,
+                recipient_address,
+                token_symbol,
+                amount,
+                currency,
+                tx_hash,
+                note,
+            ),
         )
         self._conn.commit()
         return cursor.lastrowid
 
-    def get_dividend_history(self, limit: int = 50, recipient_address: str | None = None) -> list[dict]:
+    def get_dividend_history(
+        self, limit: int = 50, recipient_address: str | None = None
+    ) -> list[dict]:
         """Get dividend distribution history, optionally filtered by recipient."""
         if recipient_address:
             rows = self._conn.execute(
@@ -1150,8 +1281,18 @@ class LocalDB:
                (platform, amount, collateral_asset, loan_asset, duration_days, purpose, 
                 repayment_address, outstanding_amount, created_at, due_date)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (platform, amount, collateral_asset, loan_asset, duration_days, purpose,
-             repayment_address, amount, created_at.isoformat(), due_date.isoformat()),
+            (
+                platform,
+                amount,
+                collateral_asset,
+                loan_asset,
+                duration_days,
+                purpose,
+                repayment_address,
+                amount,
+                created_at.isoformat(),
+                due_date.isoformat(),
+            ),
         )
         self._conn.commit()
         return cursor.lastrowid
@@ -1176,7 +1317,9 @@ class LocalDB:
         ).fetchone()
         return dict(row) if row else None
 
-    def record_repayment(self, loan_id: int, amount: float, tx_hash: str | None = None) -> None:
+    def record_repayment(
+        self, loan_id: int, amount: float, tx_hash: str | None = None
+    ) -> None:
         """Record a repayment for a loan and update outstanding amount."""
         self._conn.execute(
             "INSERT INTO loan_repayments (loan_id, amount, tx_hash) VALUES (?, ?, ?)",
@@ -1420,7 +1563,9 @@ class LocalDB:
         expires_iso = (
             lease_expires_at.isoformat()
             if lease_expires_at is not None
-            else (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+            else (
+                datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+            ).isoformat()
         )
         self._conn.execute(
             """INSERT INTO claimed_jobs (job_id, fencing_token, lease_expires_at, ttl_seconds)

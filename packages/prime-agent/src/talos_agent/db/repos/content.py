@@ -38,7 +38,9 @@ class ContentRepo:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_recent_content_by_channel(self, channel: str, limit: int = 20) -> list[dict]:
+    def get_recent_content_by_channel(
+        self, channel: str, limit: int = 20
+    ) -> list[dict]:
         rows = self._conn.execute(
             "SELECT content, channel, posted_at FROM content_history "
             "WHERE channel = ? ORDER BY posted_at DESC LIMIT ?",

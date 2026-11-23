@@ -46,7 +46,7 @@ _BLOCKED_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
     # Unique local (ULA)
     ipaddress.IPv6Network("fc00::/7"),
     # Cloud-provider metadata endpoints
-    ipaddress.IPv4Network("100.64.0.0/10"),   # CGNAT / AWS metadata
+    ipaddress.IPv4Network("100.64.0.0/10"),  # CGNAT / AWS metadata
 ]
 
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -71,6 +71,7 @@ class BlockedURLError(ValueError):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _is_blocked_ip(addr: str) -> bool:
     """Return True if *addr* falls within a blocked network range."""
@@ -99,6 +100,7 @@ def _resolve_addresses(hostname: str) -> list[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def is_public_url_sync(url: str) -> tuple[bool, Optional[str]]:
     """Synchronous variant of :func:`is_public_url`.
 
@@ -108,6 +110,7 @@ def is_public_url_sync(url: str) -> tuple[bool, Optional[str]]:
     # ── 1. Parse URL ────────────────────────────────────────────────────────
     try:
         from urllib.parse import urlparse
+
         parsed = urlparse(url)
     except Exception as exc:
         return False, f"URL parse error: {exc}"
@@ -115,7 +118,10 @@ def is_public_url_sync(url: str) -> tuple[bool, Optional[str]]:
     # ── 2. Scheme check ─────────────────────────────────────────────────────
     scheme = (parsed.scheme or "").lower()
     if scheme not in _ALLOWED_SCHEMES:
-        return False, f"Scheme '{scheme}' is not allowed; only http and https are permitted"
+        return (
+            False,
+            f"Scheme '{scheme}' is not allowed; only http and https are permitted",
+        )
 
     hostname = parsed.hostname or ""
     if not hostname:

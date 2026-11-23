@@ -168,22 +168,34 @@ def redact(
     # ── sequences ─────────────────────────────────────────────────────────────
     if isinstance(data, list):
         return [
-            redact(item, _depth=_depth + 1, max_depth=max_depth,
-                   _parent_key_sensitive=_parent_key_sensitive)
+            redact(
+                item,
+                _depth=_depth + 1,
+                max_depth=max_depth,
+                _parent_key_sensitive=_parent_key_sensitive,
+            )
             for item in data
         ]
 
     if isinstance(data, tuple):
         return tuple(
-            redact(item, _depth=_depth + 1, max_depth=max_depth,
-                   _parent_key_sensitive=_parent_key_sensitive)
+            redact(
+                item,
+                _depth=_depth + 1,
+                max_depth=max_depth,
+                _parent_key_sensitive=_parent_key_sensitive,
+            )
             for item in data
         )
 
     if isinstance(data, (set, frozenset)):
         redacted_set = {
-            redact(item, _depth=_depth + 1, max_depth=max_depth,
-                   _parent_key_sensitive=_parent_key_sensitive)
+            redact(
+                item,
+                _depth=_depth + 1,
+                max_depth=max_depth,
+                _parent_key_sensitive=_parent_key_sensitive,
+            )
             for item in data
         }
         return type(data)(redacted_set)

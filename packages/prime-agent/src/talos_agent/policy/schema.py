@@ -14,6 +14,109 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+import uuid
+
+
+# ── Canonical hashing helpers ─────────────────────────────────────────────────
+
+
+def _canonical_default(o: Any) -> Any:
+    if isinstance(o, (set, frozenset)):
+        return sorted(list(o), key=str)
+    if isinstance(o, enum.Enum):
+        return o.value
+    if hasattr(o, "to_dict") and callable(o.to_dict):
+        return o.to_dict()
+    return str(o)
+
+
+def compute_action_digest(
+    action: str,
+    params: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
+) -> str:
+    """Compute a deterministic SHA-256 digest of canonical action representation."""
+    canonical_payload = {
+        "action": action,
+        "context": context or {},
+        "params": params or {},
+    }
+    payload_json = json.dumps(
+        canonical_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_canonical_default,
+    )
+    return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+
+
+# ── Exceptions ────────────────────────────────────────────────────────────────
+
+
+class ApprovalBindingError(Exception):
+    """Base exception for policy approval binding and verification failures."""
+
+
+class PolicyDigestMismatchError(ApprovalBindingError):
+    """Raised when current engine policy digest differs from the simulated review digest."""
+
+    def __init__(
+        self,
+        expected_digest: str,
+        actual_digest: str,
+        action: str = "",
+        message: str | None = None,
+    ) -> None:
+        self.expected_digest = expected_digest
+        self.actual_digest = actual_digest
+        self.action = action
+        msg = (
+            message
+            or f"Policy digest mismatch for action '{action or '<unknown>'}': "
+            f"simulated review digest '{expected_digest}', current engine digest '{actual_digest}'. "
+            "Policies changed after review."
+        )
+        super().__init__(msg)
+
+
+class ActionDigestMismatchError(ApprovalBindingError):
+    """Raised when an action presented for execution differs from the approved action digest."""
+
+    def __init__(
+        self,
+        expected_digest: str,
+        actual_digest: str,
+        action: str = "",
+        message: str | None = None,
+    ) -> None:
+        self.expected_digest = expected_digest
+        self.actual_digest = actual_digest
+        self.action = action
+        msg = (
+            message
+            or f"Action digest mismatch for action '{action or '<unknown>'}': "
+            f"approved action digest '{expected_digest}', execution action digest '{actual_digest}'. "
+            "Action or parameters changed after review."
+        )
+        super().__init__(msg)
+
+
+class ApprovalStatusError(ApprovalBindingError):
+    """Raised when an approval record is not in an executable state (e.g. pending or rejected)."""
+
+    def __init__(
+        self,
+        approval_id: str,
+        status: str,
+        message: str | None = None,
+    ) -> None:
+        self.approval_id = approval_id
+        self.status = status
+        msg = (
+            message
+            or f"Approval '{approval_id}' cannot be executed with status '{status}' (expected 'approved')."
+        )
+        super().__init__(msg)
 
 from talos_agent.policy.patterns import PolicyPatternError, compile_glob
 
@@ -154,8 +257,7 @@ class PolicyRule:
             rule_id=d.get("rule_id", ""),
             description=d.get("description", ""),
             conditions=tuple(
-                MatchCondition.from_dict(c)
-                for c in d.get("conditions", [])
+                MatchCondition.from_dict(c) for c in d.get("conditions", [])
             ),
             decision=PolicyDecision(d.get("decision", "deny")),
             severity=Severity(d.get("severity", "high")),
@@ -264,12 +366,24 @@ class ActionSpec:
     context: dict[str, Any] = field(default_factory=dict)
     """Additional context: budget state, config values, etc."""
 
+    action_digest: str = ""
+    """Deterministic SHA-256 digest of canonical action representation."""
+
+    def __post_init__(self) -> None:
+        if not self.action_digest:
+            object.__setattr__(
+                self,
+                "action_digest",
+                compute_action_digest(self.action, self.params, self.context),
+            )
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ActionSpec:
         return cls(
             action=d.get("action", ""),
             params=d.get("params", {}),
             context=d.get("context", {}),
+            action_digest=d.get("action_digest", ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -349,10 +463,7 @@ class ConditionTrace:
         obs = self.observed if self.observed is not None else "<missing>"
         exp = self.expected if self.expected is not None else "<n/a>"
         status = "matched" if self.matched else "no-match"
-        return (
-            f"{self.field} {self.operator} {exp} "
-            f"(observed={obs}, {status})"
-        )
+        return f"{self.field} {self.operator} {exp} (observed={obs}, {status})"
 
 
 @dataclass(frozen=True)
@@ -473,10 +584,14 @@ class PolicyResult:
     violated_rules: tuple[PolicyRule, ...] = ()
     all_results: tuple[dict[str, Any], ...] = ()
     evidence: tuple[str, ...] = ()
-    evaluated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    evaluated_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     result_digest: str = ""
     simulation: bool = False
     trace: PolicyDecisionTrace | None = None
+    policy_digest: str = ""
+    action_digest: str = ""
 
     def __post_init__(self) -> None:
         if not self.result_digest:
@@ -491,6 +606,10 @@ class PolicyResult:
             "evidence": list(self.evidence),
             "simulation": self.simulation,
         }
+        if self.policy_digest:
+            payload["policy_digest"] = self.policy_digest
+        if self.action_digest:
+            payload["action_digest"] = self.action_digest
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -500,10 +619,7 @@ class PolicyResult:
         if self.trace is not None:
             return self.trace.explain()
         if self.evidence:
-            return (
-                f"decision={self.decision.value}; "
-                + "; ".join(self.evidence)
-            )
+            return f"decision={self.decision.value}; " + "; ".join(self.evidence)
         return f"decision={self.decision.value} (no evidence recorded)"
 
     def to_dict(self) -> dict[str, Any]:
@@ -523,6 +639,8 @@ class PolicyResult:
             "evaluated_at": self.evaluated_at,
             "result_digest": self.result_digest,
             "simulation": self.simulation,
+            "policy_digest": self.policy_digest,
+            "action_digest": self.action_digest,
         }
         if self.trace is not None:
             payload["trace"] = self.trace.to_dict()
@@ -536,6 +654,8 @@ class PolicyResult:
         trace: PolicyDecisionTrace | None = None,
         all_results: tuple[dict[str, Any], ...] = (),
         evidence: tuple[str, ...] = (),
+        policy_digest: str = "",
+        action_digest: str = "",
     ) -> PolicyResult:
         """Convenience factory: all checks passed."""
         return cls(
@@ -544,6 +664,8 @@ class PolicyResult:
             trace=trace,
             all_results=all_results,
             evidence=evidence,
+            policy_digest=policy_digest,
+            action_digest=action_digest,
         )
 
     @classmethod
@@ -555,15 +677,21 @@ class PolicyResult:
         trace: PolicyDecisionTrace | None = None,
         all_results: tuple[dict[str, Any], ...] = (),
         evidence: tuple[str, ...] | None = None,
+        policy_digest: str = "",
+        action_digest: str = "",
     ) -> PolicyResult:
         """Convenience factory: single rule blocked the action."""
         return cls(
             decision=PolicyDecision.DENY,
             violated_rules=(rule,),
-            evidence=evidence if evidence is not None else (f"[{rule.rule_id}] {rule.reason}",),
+            evidence=evidence
+            if evidence is not None
+            else (f"[{rule.rule_id}] {rule.reason}",),
             simulation=simulation,
             trace=trace,
             all_results=all_results,
+            policy_digest=policy_digest,
+            action_digest=action_digest,
         )
 
     @classmethod
@@ -575,6 +703,8 @@ class PolicyResult:
         trace: PolicyDecisionTrace | None = None,
         all_results: tuple[dict[str, Any], ...] = (),
         evidence: tuple[str, ...] | None = None,
+        policy_digest: str = "",
+        action_digest: str = "",
     ) -> PolicyResult:
         """Convenience factory: one or more rules require escalation."""
         return cls(
@@ -588,4 +718,111 @@ class PolicyResult:
             simulation=simulation,
             trace=trace,
             all_results=all_results,
+            policy_digest=policy_digest,
+            action_digest=action_digest,
+        )
+
+
+# ── Policy approval binding ───────────────────────────────────────────────────
+
+
+@dataclass
+class PolicyApproval:
+    """Persistent binding between an approved action and its exact simulated policy digest.
+
+    Persists canonical action identity (``action_digest``) and policy
+    identity (``policy_digest``) determined at review/simulation time.
+    """
+
+    approval_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    action: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
+    action_digest: str = ""
+    policy_digest: str = ""
+    simulated_result_digest: str = ""
+    decision: PolicyDecision = PolicyDecision.APPROVE
+    status: str = "pending"
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    approved_at: str | None = None
+    decided_by: str | None = None
+    reason: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.action_digest and self.action:
+            self.action_digest = compute_action_digest(
+                self.action, self.params, self.context
+            )
+        if isinstance(self.decision, str):
+            self.decision = PolicyDecision(self.decision)
+
+    def approve(self, decided_by: str | None = None, reason: str = "") -> None:
+        """Mark approval as approved by reviewer."""
+        self.status = "approved"
+        self.approved_at = datetime.now(timezone.utc).isoformat()
+        if decided_by is not None:
+            self.decided_by = decided_by
+        if reason:
+            self.reason = reason
+
+    def reject(self, decided_by: str | None = None, reason: str = "") -> None:
+        """Mark approval as rejected by reviewer."""
+        self.status = "rejected"
+        self.approved_at = datetime.now(timezone.utc).isoformat()
+        if decided_by is not None:
+            self.decided_by = decided_by
+        if reason:
+            self.reason = reason
+
+    def mark_executed(self) -> None:
+        """Mark approval as executed."""
+        self.status = "executed"
+
+    @property
+    def is_approved(self) -> bool:
+        return self.status == "approved"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "approval_id": self.approval_id,
+            "action": self.action,
+            "params": self.params,
+            "context": self.context,
+            "action_digest": self.action_digest,
+            "policy_digest": self.policy_digest,
+            "simulated_result_digest": self.simulated_result_digest,
+            "decision": self.decision.value,
+            "status": self.status,
+            "created_at": self.created_at,
+            "approved_at": self.approved_at,
+            "decided_by": self.decided_by,
+            "reason": self.reason,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PolicyApproval:
+        decision_val = d.get("decision", PolicyDecision.APPROVE.value)
+        if isinstance(decision_val, str):
+            decision = PolicyDecision(decision_val)
+        else:
+            decision = decision_val
+        return cls(
+            approval_id=d.get("approval_id") or str(uuid.uuid4()),
+            action=d.get("action", ""),
+            params=d.get("params", {}),
+            context=d.get("context", {}),
+            action_digest=d.get("action_digest", ""),
+            policy_digest=d.get("policy_digest", ""),
+            simulated_result_digest=d.get("simulated_result_digest", ""),
+            decision=decision,
+            status=d.get("status", "pending"),
+            created_at=d.get("created_at") or datetime.now(timezone.utc).isoformat(),
+            approved_at=d.get("approved_at"),
+            decided_by=d.get("decided_by"),
+            reason=d.get("reason", ""),
+            metadata=d.get("metadata", {}),
         )

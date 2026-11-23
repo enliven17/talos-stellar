@@ -190,7 +190,11 @@ def _build_default_policies() -> list[Policy]:
                     MatchCondition(
                         field="action",
                         operator="in",
-                        value=["transfer_xlm", "airdrop_pulse", "execute_approved_transfer"],
+                        value=[
+                            "transfer_xlm",
+                            "airdrop_pulse",
+                            "execute_approved_transfer",
+                        ],
                     ),
                     MatchCondition(
                         field="params.amount",
@@ -229,7 +233,13 @@ def _build_default_policies() -> list[Policy]:
         ),
     )
 
-    return [budget_policy, approval_policy, publishing_policy, transfer_policy, fulfillment_policy]
+    return [
+        budget_policy,
+        approval_policy,
+        publishing_policy,
+        transfer_policy,
+        fulfillment_policy,
+    ]
 
 
 # ── File-based persistence ────────────────────────────────────────────────────
@@ -447,7 +457,11 @@ class PolicyLoader:
                             "rule_id": r.rule_id,
                             "description": r.description,
                             "conditions": [
-                                {"field": c.field, "operator": c.operator, "value": c.value}
+                                {
+                                    "field": c.field,
+                                    "operator": c.operator,
+                                    "value": c.value,
+                                }
                                 for c in r.conditions
                             ],
                             "decision": r.decision.value,

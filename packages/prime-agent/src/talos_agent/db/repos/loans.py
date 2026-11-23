@@ -27,8 +27,18 @@ class LoanRepo:
                (platform, amount, collateral_asset, loan_asset, duration_days, purpose,
                 repayment_address, outstanding_amount, created_at, due_date)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (platform, amount, collateral_asset, loan_asset, duration_days, purpose,
-             repayment_address, amount, created_at.isoformat(), due_date.isoformat()),
+            (
+                platform,
+                amount,
+                collateral_asset,
+                loan_asset,
+                duration_days,
+                purpose,
+                repayment_address,
+                amount,
+                created_at.isoformat(),
+                due_date.isoformat(),
+            ),
         )
         self._conn.commit()
         return cursor.lastrowid
@@ -51,7 +61,9 @@ class LoanRepo:
         ).fetchone()
         return dict(row) if row else None
 
-    def record_repayment(self, loan_id: int, amount: float, tx_hash: str | None = None) -> None:
+    def record_repayment(
+        self, loan_id: int, amount: float, tx_hash: str | None = None
+    ) -> None:
         self._conn.execute(
             "INSERT INTO loan_repayments (loan_id, amount, tx_hash) VALUES (?, ?, ?)",
             (loan_id, amount, tx_hash),

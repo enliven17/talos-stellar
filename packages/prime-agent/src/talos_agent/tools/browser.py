@@ -146,7 +146,11 @@ def _browser_safe(fn: Callable) -> Callable:
             return {"error": f"Browser action timed out after {BROWSER_TIMEOUT}s"}
         except Exception as e:
             err_name = type(e).__name__
-            if "session" in str(e).lower() or "closed" in str(e).lower() or "500" in str(e):
+            if (
+                "session" in str(e).lower()
+                or "closed" in str(e).lower()
+                or "500" in str(e)
+            ):
                 try:
                     # Reset session-dependent state on all adapters that track login
                     if _deps().adapter_registry:
@@ -154,9 +158,13 @@ def _browser_safe(fn: Callable) -> Callable:
                         if x_adapter and hasattr(x_adapter, "_logged_in"):
                             x_adapter._logged_in = False
                     await _deps().browser.reconnect()
-                    return await asyncio.wait_for(fn(*args, **kwargs), timeout=BROWSER_TIMEOUT)
+                    return await asyncio.wait_for(
+                        fn(*args, **kwargs), timeout=BROWSER_TIMEOUT
+                    )
                 except Exception as retry_err:
-                    return {"error": f"Browser reconnect failed: {type(retry_err).__name__}: {retry_err}"}
+                    return {
+                        "error": f"Browser reconnect failed: {type(retry_err).__name__}: {retry_err}"
+                    }
             return {"error": f"Browser error ({err_name}): {e}"}
 
     return wrapper
@@ -176,11 +184,15 @@ async def _dismiss_cookie_banner() -> None:
 
 # ── General browser tools ────────────────────────────────────────────────────
 
+
 @tool("search_web", "Search Google and return top results for market research")
 @_browser_safe
 async def search_web(query: str) -> dict:
     import urllib.parse
-    search_url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}&hl=en"
+
+    search_url = (
+        f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}&hl=en"
+    )
     await _deps().browser.goto(search_url)
     await asyncio.sleep(3)
     await _dismiss_cookie_banner()
@@ -206,7 +218,11 @@ async def browse_page(url: str, instruction: str) -> dict:
 # These exist for backward compatibility with prompts that reference X-specific
 # tool names. New code should use publish_content / get_publishing_channels.
 
-@tool("post_to_x", "Post a tweet on X (Twitter). Content MUST be under 280 characters, plain text only.")
+
+@tool(
+    "post_to_x",
+    "Post a tweet on X (Twitter). Content MUST be under 280 characters, plain text only.",
+)
 @_browser_safe
 async def post_to_x(content: str) -> dict:
     adapter = _deps().adapter_registry.get("X") if _deps().adapter_registry else None

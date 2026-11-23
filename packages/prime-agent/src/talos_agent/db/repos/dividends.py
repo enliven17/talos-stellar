@@ -23,12 +23,22 @@ class DividendRepo:
             """INSERT INTO dividends_log
                (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note),
+            (
+                spending_log_id,
+                recipient_address,
+                token_symbol,
+                amount,
+                currency,
+                tx_hash,
+                note,
+            ),
         )
         self._conn.commit()
         return cursor.lastrowid
 
-    def get_dividend_history(self, limit: int = 50, recipient_address: str | None = None) -> list[dict]:
+    def get_dividend_history(
+        self, limit: int = 50, recipient_address: str | None = None
+    ) -> list[dict]:
         if recipient_address:
             rows = self._conn.execute(
                 """SELECT id, spending_log_id, recipient_address, token_symbol, amount,

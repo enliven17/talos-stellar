@@ -24,7 +24,9 @@ class ConfigRepo:
         self._conn.commit()
 
     def get_config(self, key: str) -> str | None:
-        row = self._conn.execute("SELECT value FROM talos_config WHERE key = ?", (key,)).fetchone()
+        row = self._conn.execute(
+            "SELECT value FROM talos_config WHERE key = ?", (key,)
+        ).fetchone()
         return row["value"] if row else None
 
     def set_talos_config(self, data: dict) -> None:
@@ -36,7 +38,9 @@ class ConfigRepo:
 
     # ── Playbooks ──────────────────────────────────────────
 
-    def save_playbook(self, name: str, data: dict, source_talos: str | None = None) -> None:
+    def save_playbook(
+        self, name: str, data: dict, source_talos: str | None = None
+    ) -> None:
         self._conn.execute(
             "INSERT INTO playbooks (name, data, source_talos) VALUES (?, ?, ?)",
             (name, json.dumps(data), source_talos),
@@ -68,7 +72,9 @@ class ConfigRepo:
 
     def apply_playbook(self, playbook_id: int) -> None:
         self._conn.execute("UPDATE playbooks SET applied = 0")
-        self._conn.execute("UPDATE playbooks SET applied = 1 WHERE id = ?", (playbook_id,))
+        self._conn.execute(
+            "UPDATE playbooks SET applied = 1 WHERE id = ?", (playbook_id,)
+        )
         self._conn.commit()
 
     # ── Schedules ──────────────────────────────────────────

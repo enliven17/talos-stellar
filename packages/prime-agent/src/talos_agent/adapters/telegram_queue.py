@@ -94,7 +94,9 @@ class TelegramQueueConfig:
         if self.max_age_seconds <= 0 or self.lease_seconds <= 0:
             raise ValueError("queue age and lease must be greater than zero")
         if self.backoff_initial <= 0 or self.backoff_initial > self.backoff_max:
-            raise ValueError("backoff_initial must be positive and no greater than backoff_max")
+            raise ValueError(
+                "backoff_initial must be positive and no greater than backoff_max"
+            )
         # Sent rows double as the pacing window, so they must outlive it.
         if self.retention_seconds < 2 * _RATE_WINDOW_SECONDS:
             raise ValueError("retention_seconds must cover the pacing window")
@@ -195,7 +197,10 @@ class TelegramSendQueue:
     def backoff_delay(self, attempt_count: int) -> float:
         """Exponential delay for the given (1-based) attempt, capped."""
         exponent = max(attempt_count - 1, 0)
-        return min(self.config.backoff_initial * (2 ** min(exponent, 30)), self.config.backoff_max)
+        return min(
+            self.config.backoff_initial * (2 ** min(exponent, 30)),
+            self.config.backoff_max,
+        )
 
     # ── producer side ──────────────────────────────────────
 
@@ -222,7 +227,8 @@ class TelegramSendQueue:
         with self._tx():
             if dedupe_key is not None:
                 row = self._conn.execute(
-                    "SELECT * FROM telegram_send_queue WHERE dedupe_key = ?", (dedupe_key,)
+                    "SELECT * FROM telegram_send_queue WHERE dedupe_key = ?",
+                    (dedupe_key,),
                 ).fetchone()
                 if row is not None:
                     if (
@@ -231,8 +237,12 @@ class TelegramSendQueue:
                         or row["text"] != text
                         or row["reply_to_message_id"] != reply_to_message_id
                     ):
-                        raise TelegramQueueConflictError("dedupe key was already used for different content")
-                    return EnqueueResult(row["id"], False, row["state"], row["message_id"])
+                        raise TelegramQueueConflictError(
+                            "dedupe key was already used for different content"
+                        )
+                    return EnqueueResult(
+                        row["id"], False, row["state"], row["message_id"]
+                    )
             self._expire_locked(now)
             depth = self._conn.execute(
                 "SELECT COUNT(*) FROM telegram_send_queue WHERE state IN ('pending', 'sending')"
@@ -324,10 +334,13 @@ class TelegramSendQueue:
         now = self._now()
         with self._tx():
             row = self._conn.execute(
-                "SELECT state, attempt_count FROM telegram_send_queue WHERE id = ?", (item_id,)
+                "SELECT state, attempt_count FROM telegram_send_queue WHERE id = ?",
+                (item_id,),
             ).fetchone()
             if row is None or row["state"] != STATE_SENDING:
-                raise TelegramQueueBusyError("telegram queue message is no longer claimed")
+                raise TelegramQueueBusyError(
+                    "telegram queue message is no longer claimed"
+                )
             attempts = row["attempt_count"] - (0 if consume_attempt else 1)
             if consume_attempt and attempts >= self.config.max_attempts:
                 state = STATE_FAILED
@@ -372,7 +385,9 @@ class TelegramSendQueue:
                 """,
                 (cutoff,),
             )
-            self._conn.execute("DELETE FROM telegram_rate_state WHERE blocked_until < ?", (cutoff,))
+            self._conn.execute(
+                "DELETE FROM telegram_rate_state WHERE blocked_until < ?", (cutoff,)
+            )
             return cursor.rowcount
 
     def stats(self) -> dict[str, Any]:
@@ -391,8 +406,12 @@ class TelegramSendQueue:
         ).fetchone()[0]
         return {
             "counts": counts,
-            "oldest_unsent_age_seconds": None if oldest is None else max(now - oldest, 0.0),
-            "rate_limited_for_seconds": None if not blocked or blocked <= now else blocked - now,
+            "oldest_unsent_age_seconds": None
+            if oldest is None
+            else max(now - oldest, 0.0),
+            "rate_limited_for_seconds": None
+            if not blocked or blocked <= now
+            else blocked - now,
         }
 
     # ── internals ──────────────────────────────────────────
@@ -424,7 +443,9 @@ class TelegramSendQueue:
                 (state, code, message_id, now, item_id),
             )
             if cursor.rowcount != 1:
-                raise TelegramQueueBusyError("telegram queue message is no longer claimed")
+                raise TelegramQueueBusyError(
+                    "telegram queue message is no longer claimed"
+                )
 
     def _expire_locked(self, now: float) -> None:
         """Resolve stale rows. Must run inside ``_tx``."""
@@ -451,7 +472,8 @@ class TelegramSendQueue:
         chat_id = head["chat_id"]
         waits = [head["next_attempt_at"] - now]
         blocked = self._conn.execute(
-            "SELECT blocked_until FROM telegram_rate_state WHERE chat_id = ?", (chat_id,)
+            "SELECT blocked_until FROM telegram_rate_state WHERE chat_id = ?",
+            (chat_id,),
         ).fetchone()
         if blocked is not None:
             waits.append(blocked["blocked_until"] - now)
@@ -469,7 +491,11 @@ class TelegramSendQueue:
         if recent:
             waits.append(recent[-1] + self.config.min_interval_seconds - now)
             if len(recent) >= self.config.max_per_minute:
-                waits.append(recent[len(recent) - self.config.max_per_minute] + _RATE_WINDOW_SECONDS - now)
+                waits.append(
+                    recent[len(recent) - self.config.max_per_minute]
+                    + _RATE_WINDOW_SECONDS
+                    - now
+                )
         return max(max(waits), 0.0)
 
 
@@ -557,7 +583,11 @@ class TelegramQueueWorker:
         current = self._queue.get(item_id)
         if current is not None and current.state == STATE_SENDING:
             try:
-                self._queue.mark_retry(item_id, self._queue.backoff_delay(current.attempt_count), "delivery_denied")
+                self._queue.mark_retry(
+                    item_id,
+                    self._queue.backoff_delay(current.attempt_count),
+                    "delivery_denied",
+                )
             except TelegramQueueError:
                 pass
 
@@ -568,13 +598,21 @@ class TelegramQueueWorker:
                 self._maybe_prune()
                 report = await self.drain_once()
                 if report.delivered:
-                    log.info("telegram_queue_batch", delivered=report.delivered, **self._queue.stats()["counts"])
+                    log.info(
+                        "telegram_queue_batch",
+                        delivered=report.delivered,
+                        **self._queue.stats()["counts"],
+                    )
                 if report.wait_seconds is not None:
                     delay = min(max(report.wait_seconds, 0.05), 30.0)
             except TelegramQueueError:
                 log.error("telegram_queue_batch_failed", error_code="queue_busy")
             except Exception as exc:
-                log.error("telegram_queue_batch_failed", error_code="batch_failure", error_type=type(exc).__name__)
+                log.error(
+                    "telegram_queue_batch_failed",
+                    error_code="batch_failure",
+                    error_type=type(exc).__name__,
+                )
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=delay)
                 break

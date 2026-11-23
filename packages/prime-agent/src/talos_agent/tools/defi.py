@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from talos_agent.payments.stellar_kit import format_stellar_amount, to_stellar_amount
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
@@ -38,7 +39,7 @@ async def request_defi_loan(
     repayment_address: str | None = None,
 ) -> dict:
     """Request a loan from a DeFi lending platform.
-    
+
     Args:
         platform: Name of the lending platform (e.g., 'aave', 'compound', 'blender')
         amount: Amount to borrow in loan_asset
@@ -47,7 +48,7 @@ async def request_defi_loan(
         duration_days: Expected loan duration in days (default: 30)
         purpose: Description of loan purpose
         repayment_address: Stellar public key for automated repayments
-    
+
     Returns:
         Loan request status with tracking information
     """
@@ -74,7 +75,7 @@ async def request_defi_loan(
     # For amounts below threshold, proceed with loan request
     # In a real implementation, this would interact with the lending platform's API
     # For now, we'll track the loan request in the database
-    
+
     loan_id = _deps().db.create_loan(
         platform=platform,
         amount=amount,
@@ -84,14 +85,14 @@ async def request_defi_loan(
         purpose=purpose,
         repayment_address=repayment_address,
     )
-    
+
     # Record as spending for budget tracking
     _deps().db.record_spending(
         amount=amount,
         category="defi_loan",
         description=f"Loan from {platform}: {purpose}",
     )
-    
+
     return {
         "status": "requested",
         "loan_id": loan_id,
@@ -124,21 +125,21 @@ async def get_active_loans() -> dict:
 )
 async def repay_loan(loan_id: int, amount: float | str | None = None) -> dict:
     """Repay a loan, either partially or in full.
-    
+
     Args:
         loan_id: Database ID of the loan to repay
         amount: Amount to repay (if None, repays full outstanding amount)
-    
+
     Returns:
         Repayment status
     """
     loan = _deps().db.get_loan_by_id(loan_id)
     if not loan:
         return {"error": f"Loan {loan_id} not found"}
-    
+
     if loan["status"] != "active":
         return {"error": f"Loan {loan_id} is not active (status: {loan['status']})"}
-    
+
     outstanding_dec = to_stellar_amount(loan["outstanding_amount"])
 
     # If amount not specified, repay full outstanding
@@ -146,16 +147,20 @@ async def repay_loan(loan_id: int, amount: float | str | None = None) -> dict:
         amount_dec = outstanding_dec
     else:
         amount_dec = to_stellar_amount(amount)
-    
+
     if amount_dec > outstanding_dec:
-        return {"error": f"Repayment amount {amount_dec} exceeds outstanding {outstanding_dec}"}
-    
+        return {
+            "error": f"Repayment amount {amount_dec} exceeds outstanding {outstanding_dec}"
+        }
+
     formatted_amount = format_stellar_amount(amount_dec)
     amount_float = float(formatted_amount)
+    remaining_dec = outstanding_dec - amount_dec
+    formatted_remaining = format_stellar_amount(remaining_dec)
 
     # Check approval threshold for repayment
     threshold = float(_deps().settings.approval_threshold)
-    if amount > threshold:
+    if amount_float > threshold:
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",
@@ -169,10 +174,10 @@ async def repay_loan(loan_id: int, amount: float | str | None = None) -> dict:
             "loan_id": loan_id,
             "amount": formatted_amount,
         }
-    
+
     # Process repayment
-    _deps().db.record_repayment(loan_id, amount)
-    
+    _deps().db.record_repayment(loan_id, amount_float)
+
     return {
         "status": "repayment_recorded",
         "loan_id": loan_id,

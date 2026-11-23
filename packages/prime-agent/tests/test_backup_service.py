@@ -39,6 +39,7 @@ from talos_agent.db import LocalDB
 def _seed_agent_db(db_path: Path) -> LocalDB:
     """Create a small but readable LocalDB at `db_path`."""
     db = LocalDB(path=db_path)
+    db.close()
     # SQLite hot backup uses Connection.backup, so any LocalDB is fine.
     return db
 

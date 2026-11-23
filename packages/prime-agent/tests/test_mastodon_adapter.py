@@ -13,13 +13,11 @@ import json
 import httpx
 import pytest
 
-from talos_agent.adapters.base import ChannelCapabilities, PublishResult
 from talos_agent.adapters.capability import (
     AdapterCapabilityManifest,
     AdapterResourceLimits,
     AdapterSandbox,
     CapabilityDeniedError,
-    NetworkRule,
 )
 from talos_agent.adapters.mastodon import (
     DEFAULT_CHAR_LIMIT,
@@ -466,7 +464,6 @@ class TestMastodonCapabilityManifest:
     def test_sandbox_denies_search_not_in_manifest(self):
         """An operation absent from the manifest must raise CapabilityDeniedError."""
         import asyncio
-        import sqlite3
         import tempfile
 
         from talos_agent.db import LocalDB
@@ -498,5 +495,8 @@ class TestMastodonCapabilityManifest:
             )
             wrapped = sandbox.wrap(adapter)
 
-            with pytest.raises(CapabilityDeniedError):
-                asyncio.get_event_loop().run_until_complete(wrapped.search("query"))
+            try:
+                with pytest.raises(CapabilityDeniedError):
+                    asyncio.run(wrapped.search("query"))
+            finally:
+                db.close()

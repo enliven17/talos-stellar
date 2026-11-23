@@ -132,17 +132,24 @@ def single_flight(name: str):
     try:
         try:
             import fcntl  # type: ignore[import-not-found]
+
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (ImportError, OSError) as exc:
             # Windows doesn't support fcntl.flock the same way; fall back to
             # a sentinel file. We never want to silently drop the lock.
-            if isinstance(exc, OSError) and exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-                raise BackupBusyError(f"Another backup/restore is already running: {name}")
+            if isinstance(exc, OSError) and exc.errno in (
+                errno.EWOULDBLOCK,
+                errno.EAGAIN,
+            ):
+                raise BackupBusyError(
+                    f"Another backup/restore is already running: {name}"
+                )
             # If fcntl unavailable, do best-effort cross-platform lock.
         yield
     finally:
         try:
             import fcntl  # type: ignore[import-not-found]
+
             fcntl.flock(fd, fcntl.LOCK_UN)
         except (ImportError, OSError):
             pass
@@ -173,11 +180,13 @@ def _sha256_bytes(data: bytes) -> str:
 def _b64(data: bytes) -> str:
     """Base64 encode without chunking (keeps the JSON compact and deterministic)."""
     import base64 as _b64mod
+
     return _b64mod.b64encode(data).decode("ascii")
 
 
 def _b64_decode(s: str) -> bytes:
     import base64 as _b64mod
+
     return _b64mod.b64decode(s.encode("ascii"))
 
 
@@ -190,11 +199,15 @@ def _safe_filename(name: str) -> str:
     preventing an attacker who edits an artifact from writing outside the
     restore root.
     """
-    bad = set("\\:*?\"<>|\0")
+    bad = set('\\:*?"<>|\0')
     if any(c in bad for c in name):
-        raise BackupError(f"Unsafe filename in backup manifest: {name!r}", code="BAD_INPUT")
+        raise BackupError(
+            f"Unsafe filename in backup manifest: {name!r}", code="BAD_INPUT"
+        )
     if ".." in name.split("/") or ".." in name.split("\\"):
-        raise BackupError(f"Path traversal rejected in backup manifest: {name!r}", code="BAD_INPUT")
+        raise BackupError(
+            f"Path traversal rejected in backup manifest: {name!r}", code="BAD_INPUT"
+        )
     return name
 
 
@@ -727,41 +740,9 @@ def prune_backups(
     return deleted
 
 
-def preview_database_retention(
-    db_path: Path | None = None,
-    agent_id: str | None = None,
-    *,
-    record_class: str | None = None,
-    cutoff_iso: str | None = None,
-):
-    """Preview local SQLite database retention candidates grouped by record class (#1451).
-
-    Reads directly from the specified database (or default/per-agent DB) without modifying
-    or deleting any rows.
-    """
-    from talos_agent.db.facade import LocalDB
-    from talos_agent.db.retention import preview_state_retention
-
-    target = db_path or _get_active_db_path(agent_id)
-    if not target.exists():
-        raise BackupError(f"Database not found at {target}", code="BAD_INPUT")
-
-    db = LocalDB(path=target)
-    try:
-        return preview_state_retention(
-            db._conn,
-            record_class_filter=record_class,
-            cutoff_iso=cutoff_iso,
-        )
-    finally:
-        db.close()
-
-
 # ────────────────────────────────────────────────────────────────────
 # Verify
 # ────────────────────────────────────────────────────────────────────
-
-
 
 
 def stream_encrypted_artifact(
@@ -817,7 +798,6 @@ def stream_encrypted_artifact(
                     pass
         raise
     return written
-
 
 
 def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
@@ -1066,30 +1046,10 @@ def restore_backup(
                         f"Size mismatch for {safe}: expected {expected_size} got {len(raw)}",
                         code="BAD_INPUT",
                     )
-
-                rel = safe[len("db/"):]
-                source_agent_id = _agent_id_from_db_name(rel)
-                if (
-                    expected_agent_id
-                    and source_agent_id
-                    and source_agent_id != expected_agent_id
-                ):
-                    raise BackupError(
-                        f"Artifact database belongs to agent {source_agent_id!r}, not "
-                        f"{expected_agent_id!r}",
-                        code="IDENTITY_MISMATCH",
-                    )
-
-                # An explicit --agent-id selects the destination database; an
-                # unqualified restore keeps using the artifact's filename as
-                # before (backwards compatible).
-                target_name = (
-                    f"agent-{expected_agent_id}.db"
-                    if expected_agent_id
-                    else Path(rel).name
-                )
-                target = (target_root / target_name).resolve()
-                if not target.is_relative_to(target_root.resolve()):
+                # Place the file under `target_root/<relative-name>`.
+                rel = safe[len("db/") :]
+                target = (target_root / rel).resolve()
+                if not str(target).startswith(str(target_root.resolve())):
                     raise BackupError(
                         f"Refusing restore target outside restore_root: {target}",
                         code="BAD_INPUT",
