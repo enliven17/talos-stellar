@@ -46,12 +46,17 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
     deadLettered: 0,
     cancelled: 0,
     reaped: 0,
+    agedOut: 0,
   };
 
   // Recover jobs whose worker died mid-lease before claiming new work, so a
   // crash never strands a job past its lease window longer than necessary.
   const reaped = await store.reapExpiredLeases();
   summary.reaped = reaped.requeued + reaped.deadLettered;
+
+  // Expire pending jobs that have waited past the queue-age deadline without
+  // ever being claimed. These never ran, so no retry attempt is consumed.
+  summary.agedOut = await store.expireAgedPendingJobs();
 
   if (queues.length === 0) return summary;
 
