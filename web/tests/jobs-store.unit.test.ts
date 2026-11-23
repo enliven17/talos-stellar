@@ -13,6 +13,8 @@ const { mockDb } = mocks;
 vi.mock("@/db", () => ({ db: mocks.mockDb }));
 
 import * as store from "../src/lib/jobs/store";
+import { jobsConfig } from "../src/lib/jobs/config";
+import { boundError, boundResult, truncateError, truncateResult } from "../src/lib/jobs/metrics";
 
 /**
  * A single object whose chained methods (from/where/orderBy/limit/set/values)
@@ -106,6 +108,48 @@ describe("jobs/store — heartbeat", () => {
     const result = await store.heartbeat("job_1", "stale_lease");
     expect(result).toEqual({ ok: false, cancelled: false });
   });
+
+  it("checks both lease identifier and lease expiry (leaseExpiresAt > now()) in where clause", async () => {
+    const chain = chainable([{ cancelRequested: false, queue: "q" }]);
+    mockDb.update.mockReturnValue(chain);
+
+    await store.heartbeat("job_1", "lease_1");
+
+    expect(chain.where).toHaveBeenCalledTimes(1);
+    const whereCondition = chain.where.mock.calls[0][0];
+    const { PgDialect } = await import("drizzle-orm/pg-core");
+    const dialect = new PgDialect();
+    const compiled = dialect.sqlToQuery(whereCondition.getSQL());
+    expect(compiled.sql).toContain('"tls_jobs"."leaseExpiresAt" > now()');
+    expect(compiled.sql).toContain('"tls_jobs"."leaseId" = $');
+    expect(compiled.sql).toContain('"tls_jobs"."status" = $');
+    expect(compiled.params).toContain("job_1");
+    expect(compiled.params).toContain("lease_1");
+    expect(compiled.params).toContain("leased");
+  });
+
+  it("rejects heartbeat requests after lease deadline has elapsed (0 rows updated)", async () => {
+    // When the lease has expired, the WHERE clause (leaseExpiresAt > now()) matches no rows.
+    mockDb.update.mockReturnValue(chainable([]));
+    const result = await store.heartbeat("job_1", "expired_lease");
+    expect(result).toEqual({ ok: false, cancelled: false });
+  });
+
+  it("leaves expired lease eligible for reapExpiredLeases after heartbeat is rejected", async () => {
+    // 1. Worker attempts heartbeat on expired lease -> rejected without modifying db state
+    mockDb.update.mockReturnValueOnce(chainable([]));
+    const heartbeatResult = await store.heartbeat("job_expired", "lease_expired");
+    expect(heartbeatResult.ok).toBe(false);
+
+    // 2. Normal reaper runs and recovers the unmutated expired lease
+    const reapedRow = { id: "job_expired", queue: "q" };
+    mockDb.update
+      .mockReturnValueOnce(chainable([reapedRow])) // requeued
+      .mockReturnValueOnce(chainable([])); // deadLettered
+
+    const reapSummary = await store.reapExpiredLeases();
+    expect(reapSummary).toEqual({ requeued: 1, deadLettered: 0 });
+  });
 });
 
 describe("jobs/store — complete", () => {
@@ -120,6 +164,92 @@ describe("jobs/store — complete", () => {
     mockDb.update.mockReturnValue(chainable([]));
     const result = await store.complete("job_1", "stale_lease", {});
     expect(result).toBeNull();
+  });
+
+  it("persists a result whose serialized JSON size is exactly at maxResultBytes", async () => {
+    const originalMax = jobsConfig.maxResultBytes;
+    try {
+      const payload = { ok: true, data: "a".repeat(64) };
+      const exactBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+      jobsConfig.maxResultBytes = exactBytes;
+
+      let capturedSet: Record<string, unknown> | undefined;
+      mockDb.update.mockImplementation(() => {
+        const obj = chainable([{ id: "job_1", queue: "q", status: "completed", attempts: 1, result: payload }]);
+        const originalSet = obj.set as (v: unknown) => unknown;
+        obj.set = vi.fn((v: Record<string, unknown>) => {
+          capturedSet = v;
+          return originalSet(v);
+        });
+        return obj;
+      });
+
+      await store.complete("job_1", "lease_1", payload);
+      expect(capturedSet?.result).toEqual(payload);
+    } finally {
+      jobsConfig.maxResultBytes = originalMax;
+    }
+  });
+
+  it("replaces an oversized result with a stable bounded diagnostic envelope", async () => {
+    const originalMax = jobsConfig.maxResultBytes;
+    const originalErrMax = jobsConfig.maxErrorBytes;
+    try {
+      jobsConfig.maxResultBytes = 128;
+      jobsConfig.maxErrorBytes = 500; // error bound is higher and independent
+      const oversized = { blob: "x".repeat(300) };
+      const expectedActualBytes = Buffer.byteLength(JSON.stringify(oversized), "utf8");
+
+      let capturedSet: Record<string, unknown> | undefined;
+      mockDb.update.mockImplementation(() => {
+        const obj = chainable([{ id: "job_1", queue: "q", status: "completed", attempts: 1 }]);
+        const originalSet = obj.set as (v: unknown) => unknown;
+        obj.set = vi.fn((v: Record<string, unknown>) => {
+          capturedSet = v;
+          return originalSet(v);
+        });
+        return obj;
+      });
+
+      await store.complete("job_1", "lease_1", oversized);
+
+      expect(capturedSet?.result).toEqual({
+        truncated: true,
+        reason: "result_exceeds_max_bytes",
+        maxBytes: 128,
+        actualBytes: expectedActualBytes,
+        diagnostic: `job result size (${expectedActualBytes} bytes) exceeded maxResultBytes (128 bytes)`,
+      });
+    } finally {
+      jobsConfig.maxResultBytes = originalMax;
+      jobsConfig.maxErrorBytes = originalErrMax;
+    }
+  });
+
+  it("replaces an unserializable result (circular / BigInt) with a stable diagnostic envelope without throwing", async () => {
+    const circular: Record<string, unknown> = { ok: true };
+    circular.self = circular;
+
+    let capturedSet: Record<string, unknown> | undefined;
+    mockDb.update.mockImplementation(() => {
+      const obj = chainable([{ id: "job_1", queue: "q", status: "completed", attempts: 1 }]);
+      const originalSet = obj.set as (v: unknown) => unknown;
+      obj.set = vi.fn((v: Record<string, unknown>) => {
+        capturedSet = v;
+        return originalSet(v);
+      });
+      return obj;
+    });
+
+    await store.complete("job_1", "lease_1", circular);
+
+    expect(capturedSet?.result).toEqual({
+      truncated: true,
+      reason: "result_unserializable",
+      maxBytes: jobsConfig.maxResultBytes,
+      actualBytes: null,
+      diagnostic: "job result could not be serialized to JSON",
+    });
   });
 });
 
@@ -183,6 +313,89 @@ describe("jobs/store — fail", () => {
     expect(typeof capturedSet?.lastError).toBe("string");
     expect(capturedSet?.lastError).toContain("secret-token=abc123");
     expect(capturedSet?.leaseId).toBeNull();
+  });
+
+  it("bounds oversized lastError independently of maxResultBytes on both retry and dead_letter transitions", async () => {
+    const originalErrMax = jobsConfig.maxErrorBytes;
+    const originalResMax = jobsConfig.maxResultBytes;
+    try {
+      jobsConfig.maxErrorBytes = 32;
+      jobsConfig.maxResultBytes = 65_536; // result limit stays large while error limit is tight
+
+      const current = { id: "job_1", queue: "q", leaseId: "lease_1", status: "leased", attempts: 8, maxAttempts: 8, retryClass: "transient" };
+      mockDb.select.mockReturnValue(chainable([current]));
+      let capturedSet: Record<string, unknown> | undefined;
+      mockDb.update.mockImplementation(() => {
+        const obj = chainable([{ id: "job_1", queue: "q", status: "dead_letter", attempts: 8, maxAttempts: 8 }]);
+        const originalSet = obj.set as (v: unknown) => unknown;
+        obj.set = vi.fn((v: Record<string, unknown>) => {
+          capturedSet = v;
+          return originalSet(v);
+        });
+        return obj;
+      });
+
+      const longMsg = "E".repeat(120);
+      await store.fail("job_1", "lease_1", new Error(longMsg));
+
+      expect(capturedSet?.status).toBe("dead_letter");
+      expect(capturedSet?.lastError).toBe(`${"E".repeat(32)}…`);
+    } finally {
+      jobsConfig.maxErrorBytes = originalErrMax;
+      jobsConfig.maxResultBytes = originalResMax;
+    }
+  });
+});
+
+describe("jobs/metrics — independent result and error bounding", () => {
+  it("bounds error messages by UTF-8 byte length without splitting multi-byte code points", () => {
+    // "🚀" is 4 UTF-8 bytes; with maxBytes=10, at most two rockets (8 bytes) fit before "…"
+    const multiByte = "🚀".repeat(5); // 20 bytes
+    const outcome = boundError(new Error(multiByte), 10);
+    expect(outcome.truncated).toBe(true);
+    expect(outcome.actualBytes).toBe(20);
+    expect(outcome.maxBytes).toBe(10);
+    expect(outcome.value).toBe("🚀🚀…");
+    // Ensure no replacement character / broken surrogate exists
+    expect(Buffer.from(outcome.value, "utf8").toString("utf8")).toBe("🚀🚀…");
+  });
+
+  it("keeps error messages at or below the exact UTF-8 byte boundary untouched", () => {
+    const exact = "a".repeat(64);
+    const outcome = boundError(new Error(exact), 64);
+    expect(outcome).toEqual({
+      value: exact,
+      truncated: false,
+      actualBytes: 64,
+      maxBytes: 64,
+    });
+    expect(truncateError(new Error(exact), 64)).toBe(exact);
+  });
+
+  it("bounds result and error sizes with independent thresholds", () => {
+    const smallResultLimit = 60;
+    const largeErrorLimit = 200;
+
+    const payload = { detail: "x".repeat(80) }; // > 60 bytes
+    const errText = "e".repeat(120); // <= 200 bytes
+
+    const resOutcome = boundResult(payload, smallResultLimit);
+    const errOutcome = boundError(new Error(errText), largeErrorLimit);
+
+    expect(resOutcome.truncated).toBe(true);
+    expect(resOutcome.reason).toBe("result_exceeds_max_bytes");
+    expect(errOutcome.truncated).toBe(false);
+    expect(errOutcome.value).toBe(errText);
+
+    // Reverse: large result limit, small error limit
+    const resOutcome2 = boundResult(payload, 500);
+    const errOutcome2 = boundError(new Error(errText), 40);
+
+    expect(resOutcome2.truncated).toBe(false);
+    expect(resOutcome2.value).toEqual(payload);
+    expect(errOutcome2.truncated).toBe(true);
+    expect(errOutcome2.value).toBe(`${"e".repeat(40)}…`);
+    expect(truncateResult(payload, 500)).toEqual(payload);
   });
 });
 

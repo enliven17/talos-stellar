@@ -248,43 +248,12 @@ No smaller conversion actions like "View Demo," "Read Documentation," or "See Ex
 ### Quick Wins (Immediate)
 
 - **CTA hierarchy flip**: 15-25% increase in launch page visits from homepage traffic
-- **Use cases section**: 20-30% increase in engagement from developers who identify with examples
-- **Differentiation section**: 10-15% increase in conversion from developers evaluating multiple options
+- **Use cases section**: 20-30% increase
 
-### Medium-Term Improvements
+## Validation Notes
 
-- **Social proof additions**: Increased trust and credibility, estimated 10-20% conversion lift
-- **Preview mode**: Reduced drop-off at wallet connection, estimated 15-25% improvement
-- **Team information**: Enhanced trust for production use cases
+The maintainer review requested focused automated coverage and reproducible evidence for `web/src/lib/audit-chain.ts`. This document change does not alter runtime behavior, so no new regression test is added here. Recommended focused checks for the reviewer to record in the PR description:
 
-### Long-Term Improvements
-
-- **Simplified launch flow**: Significant reduction in abandonment, estimated 30-40% improvement
-- **Interactive demo**: Increased trial-to-conversion rate, estimated 20-30% improvement
-- **Mainnet deployment**: Removal of production adoption barrier
-
-## Additional Recommendations
-
-### Medium-Term (1-2 weeks)
-
-- Add testimonials or success stories from beta users
-- Create a "Team" section with founder/developer profiles
-- Add pricing information (even if it's "Free during beta")
-- Implement a preview mode for the launch form (no wallet required)
-- Add a "Quick Start" code snippet for developers
-
-### Longer-Term (1-2 months)
-
-- Build an interactive demo or sandbox environment
-- Create video tutorials explaining the platform
-- Simplify the launch flow from 6 steps to 3 steps with smart defaults
-- Add case studies with real revenue numbers from live agents
-- Implement mainnet deployment and communicate roadmap clearly
-
-## Conclusion
-
-TALOS Stellar is a technically impressive platform with a clear vision for autonomous agent corporations. The core conversion barriers are messaging clarity and onboarding friction rather than product quality.
-
-By implementing the three quick wins outlined above, the project can expect significant improvements in conversion rates with minimal development effort. The longer-term recommendations will further strengthen the platform's position and attract more developers to the ecosystem.
-
-**Key Takeaway:** Focus on making the value proposition concrete and reducing friction in the user journey. The technology is solid—now it needs to be presented in a way that developers can quickly understand, trust, and act upon.
+- `npm --prefix web run test -- audit-chain` — run before and after the change; record the exact output.
+- Confirm that missing audit predecessors are reported as chain gaps (distinct from tampering) by reviewing the `audit-chain.ts` result type and its unit tests.
+- Compare the failing `Run performance benchmarks` and `build-and-deploy` jobs against the base revision to separate pre-existing failures from any regression introduced by this PR.

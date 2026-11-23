@@ -7,6 +7,20 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+export const DEFAULT_OUTBOX_PAYLOAD_VERSION = 1;
+export const DEFAULT_SUPPORTED_PAYLOAD_VERSIONS = [1];
+
+export function parseSupportedPayloadVersions(raw: string | undefined): number[] {
+  if (!raw || !raw.trim()) {
+    return DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
+  }
+  const versions = raw
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  return versions.length > 0 ? Array.from(new Set(versions)) : DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
+}
+
 /** Master switch. Defaults to disabled — opt-in, backward-compatible rollout. */
 export const OUTBOX_ENABLED = process.env.OUTBOX_ENABLED === "true";
 
@@ -20,6 +34,7 @@ export const outboxConfig = {
   /** Dispatched events older than this are eligible for pruning (retention). */
   retentionDays: envInt("OUTBOX_RETENTION_DAYS", 7),
   workerId: process.env.OUTBOX_WORKER_ID || `${process.pid}-${randomUUID().slice(0, 8)}`,
+  supportedPayloadVersions: parseSupportedPayloadVersions(process.env.OUTBOX_SUPPORTED_PAYLOAD_VERSIONS),
 };
 
 /** Bearer token for /api/admin/outbox/* inspection endpoints. */
