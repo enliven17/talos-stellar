@@ -1,7 +1,20 @@
-import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, lt, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { tlsJobs, tlsJobAttempts } from "@/db/schema";
-import type { AttemptTerminalReason, EnqueueOptions, JobAttemptRecord, JobRecord, JobStatus, RetryClass } from "./types";
+import { tlsJobs } from "@/db/schema";
+import type {
+  BulkRetryCandidate,
+  BulkRetryExcluded,
+  BulkRetryExecutionResult,
+  BulkRetryFilter,
+  BulkRetryPreview,
+  BulkRetryReason,
+  BulkRetrySelection,
+  BulkRetrySkippedItem,
+  EnqueueOptions,
+  JobRecord,
+  JobStatus,
+  RetryClass,
+} from "./types";
 import { decideRetry } from "./retry";
 import { jobsConfig } from "./config";
 import { boundError, boundResult, logJobEvent } from "./metrics";
@@ -528,39 +541,233 @@ export async function getJob(jobId: string): Promise<JobRecord | null> {
   return row ? toRecord(row) : null;
 }
 
+// ─── Bulk retry preview & revision-checked execution ───────────────
+
 /**
- * Expires pending jobs that have waited longer than the configured
- * queue-age deadline without being claimed by any worker. Transitions
- * matching rows directly to dead_letter without consuming a retry attempt —
- * the job never ran, so the attempt ceiling is preserved for manual requeue.
- *
- * Returns the number of jobs expired. When queueAgeDeadlineMs is 0 (the
- * default) the function is a no-op and returns 0 immediately.
- *
- * Configuration: JOBS_QUEUE_AGE_DEADLINE_MS (default 0 = disabled).
+ * Returns the optimistic-concurrency revision token for a job (`updatedAt` as
+ * an ISO-8601 timestamp). Callers pass this token back when executing a bulk
+ * retry so any concurrent modification rejects the stale retry.
  */
-export async function expireAgedPendingJobs(
-  queueAgeDeadlineMs: number = jobsConfig.queueAgeDeadlineMs,
-): Promise<number> {
-  if (queueAgeDeadlineMs <= 0) return 0;
+export function getJobRevision(job: Pick<JobRecord, "updatedAt">): string {
+  const updatedAt = job.updatedAt instanceof Date ? job.updatedAt : new Date(job.updatedAt);
+  return updatedAt.toISOString();
+}
 
-  const cutoff = sql`now() - (${queueAgeDeadlineMs}::text || ' milliseconds')::interval`;
-  const expired = await db
-    .update(tlsJobs)
-    .set({
-      status: "dead_letter",
-      lastError: `queue-age deadline exceeded: job waited more than ${queueAgeDeadlineMs}ms without being claimed`,
-    })
-    .where(
-      and(
-        eq(tlsJobs.status, "pending"),
-        lt(tlsJobs.createdAt, cutoff),
-      ),
-    )
-    .returning({ id: tlsJobs.id, queue: tlsJobs.queue });
+function evaluateBulkRetryEligibility(
+  job: JobRecord,
+  filter: Pick<BulkRetryFilter, "queue" | "retryClass" | "includeCancelled" | "allowFatal">,
+): BulkRetryReason {
+  if (filter.queue && job.queue !== filter.queue) return "queue_mismatch";
+  if (filter.retryClass && job.retryClass !== filter.retryClass) return "retry_class_mismatch";
 
-  for (const row of expired) {
-    logJobEvent("job_dead_letter", { jobId: row.id, queue: row.queue });
+  if (job.status === "cancelled") {
+    if (!filter.includeCancelled) return "cancelled_excluded";
+  } else if (job.status !== "dead_letter") {
+    return "status_not_failed";
   }
-  return expired.length;
+
+  if (job.retryClass === "fatal" && !filter.allowFatal) return "fatal_retry_class";
+  return "eligible";
+}
+
+/**
+ * Dry-run preview for bulk retrying failed jobs. Filters candidate jobs,
+ * classifies each as eligible or ineligible with an explicit reason, and
+ * returns counts by reason plus each eligible job's revision token.
+ * Performs no mutations.
+ */
+export async function previewBulkRetry(filter: BulkRetryFilter = {}): Promise<BulkRetryPreview> {
+  const includeCancelled = filter.includeCancelled ?? false;
+  const allowFatal = filter.allowFatal ?? false;
+  const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+
+  let rows: JobRecord[];
+  const missingIds: string[] = [];
+
+  if (filter.jobIds && filter.jobIds.length > 0) {
+    const uniqueIds = Array.from(new Set(filter.jobIds));
+    const fetched = await db.select().from(tlsJobs).where(inArray(tlsJobs.id, uniqueIds));
+    const byId = new Map(fetched.map((row) => [row.id, toRecord(row)]));
+    rows = [];
+    for (const id of uniqueIds) {
+      const found = byId.get(id);
+      if (found) rows.push(found);
+      else missingIds.push(id);
+    }
+  } else {
+    const conditions = [];
+    if (filter.queue) conditions.push(eq(tlsJobs.queue, filter.queue));
+    if (filter.retryClass) conditions.push(eq(tlsJobs.retryClass, filter.retryClass));
+
+    const fetched = await db
+      .select()
+      .from(tlsJobs)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(tlsJobs.createdAt))
+      .limit(limit);
+    rows = fetched.map(toRecord);
+  }
+
+  const eligible: BulkRetryCandidate[] = [];
+  const ineligible: BulkRetryExcluded[] = [];
+  const countsByReason: Partial<Record<BulkRetryReason, number>> = {};
+  const increment = (reason: BulkRetryReason) => {
+    countsByReason[reason] = (countsByReason[reason] ?? 0) + 1;
+  };
+
+  for (const id of missingIds) {
+    increment("not_found");
+    ineligible.push({
+      id,
+      queue: null,
+      status: null,
+      retryClass: null,
+      revision: null,
+      reason: "not_found",
+    });
+  }
+
+  for (const job of rows) {
+    const revision = getJobRevision(job);
+    const reason = evaluateBulkRetryEligibility(job, {
+      queue: filter.queue,
+      retryClass: filter.retryClass,
+      includeCancelled,
+      allowFatal,
+    });
+    increment(reason);
+
+    if (reason === "eligible") {
+      eligible.push({
+        id: job.id,
+        queue: job.queue,
+        status: job.status,
+        retryClass: job.retryClass,
+        attempts: job.attempts,
+        maxAttempts: job.maxAttempts,
+        lastError: job.lastError,
+        revision,
+        reason: "eligible",
+      });
+    } else {
+      ineligible.push({
+        id: job.id,
+        queue: job.queue,
+        status: job.status,
+        retryClass: job.retryClass,
+        revision,
+        reason,
+      });
+    }
+  }
+
+  return {
+    dryRun: true,
+    totalEvaluated: eligible.length + ineligible.length,
+    eligibleCount: eligible.length,
+    ineligibleCount: ineligible.length,
+    countsByReason,
+    eligible,
+    ineligible,
+  };
+}
+
+/**
+ * Executes a bulk retry for explicitly selected `(id, revision)` pairs.
+ * Each job is requeued atomically only if its `updatedAt` revision is still
+ * unchanged and it remains in an eligible failed state; any stale or
+ * ineligible job is skipped with an explicit reason.
+ */
+export async function executeBulkRetry(
+  selections: BulkRetrySelection[],
+  opts: { includeCancelled?: boolean; allowFatal?: boolean } = {},
+): Promise<BulkRetryExecutionResult> {
+  const includeCancelled = opts.includeCancelled ?? false;
+  const allowFatal = opts.allowFatal ?? false;
+  const requeued: JobRecord[] = [];
+  const skipped: BulkRetrySkippedItem[] = [];
+
+  for (const selection of selections) {
+    const expectedDate = new Date(selection.revision);
+    if (!selection.revision || Number.isNaN(expectedDate.getTime())) {
+      skipped.push({
+        id: selection.id,
+        expectedRevision: selection.revision,
+        currentRevision: null,
+        reason: "invalid_revision",
+      });
+      continue;
+    }
+
+    const statusCond = includeCancelled
+      ? sql`${tlsJobs.status} IN ('dead_letter', 'cancelled')`
+      : eq(tlsJobs.status, "dead_letter");
+
+    const whereConds = [
+      eq(tlsJobs.id, selection.id),
+      eq(tlsJobs.updatedAt, expectedDate),
+      statusCond,
+    ];
+    if (!allowFatal) {
+      whereConds.push(ne(tlsJobs.retryClass, "fatal"));
+    }
+
+    const [updated] = await db
+      .update(tlsJobs)
+      .set({
+        status: "pending",
+        attempts: 0,
+        lastError: null,
+        cancelRequested: false,
+        runAt: sql`now()`,
+        updatedAt: sql`now()`,
+      })
+      .where(and(...whereConds))
+      .returning();
+
+    if (updated) {
+      const record = toRecord(updated);
+      requeued.push(record);
+      continue;
+    }
+
+    const current = await getJob(selection.id);
+    if (!current) {
+      skipped.push({
+        id: selection.id,
+        expectedRevision: selection.revision,
+        currentRevision: null,
+        reason: "not_found",
+      });
+      continue;
+    }
+
+    const currentRevision = getJobRevision(current);
+    if (currentRevision !== expectedDate.toISOString()) {
+      skipped.push({
+        id: selection.id,
+        expectedRevision: selection.revision,
+        currentRevision,
+        reason: "revision_mismatch",
+      });
+      continue;
+    }
+
+    const reason = evaluateBulkRetryEligibility(current, { includeCancelled, allowFatal });
+    skipped.push({
+      id: selection.id,
+      expectedRevision: selection.revision,
+      currentRevision,
+      reason: reason === "eligible" ? "revision_mismatch" : reason,
+    });
+  }
+
+  return {
+    dryRun: false,
+    requestedCount: selections.length,
+    requeuedCount: requeued.length,
+    skippedCount: skipped.length,
+    requeued,
+    skipped,
+  };
 }
