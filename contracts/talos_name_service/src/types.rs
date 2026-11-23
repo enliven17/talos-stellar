@@ -79,6 +79,20 @@ pub struct NamesPage {
     pub next_start: u32,
 }
 
+/// A pending transfer of a registered name to another Talos identity.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameTransfer {
+    pub name: String,
+    pub source_owner: Address,
+    pub recipient: Address,
+    pub recipient_talos_id: u32,
+    pub expires_at: u64,
+}
+
+/// Name transfer proposals remain valid for seven days.
+pub const NAME_TRANSFER_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -93,6 +107,7 @@ pub enum DataKey {
     NameFeeAmount,
     Guardians,
     PauseState(PauseDomain),
+    PendingNameTransfer(u32),
 }
 
 #[contracterror]

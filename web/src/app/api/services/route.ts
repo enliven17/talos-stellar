@@ -14,6 +14,10 @@ import { parsePriceRange } from "@/lib/parse-price";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withTraceContext } from "@/lib/tracing";
 import { internalError } from "@/lib/api-response";
+import {
+  deriveServiceAvailability,
+  type ServiceAvailabilityEvidence,
+} from "@/lib/marketplace-availability";
 
 export type ServiceCursor = {
   createdAt: string;
@@ -25,16 +29,20 @@ type ServiceRow = {
   talosId: string;
   talosName: string;
   talosCategory: string;
+  talosStatus: string;
   serviceName: string;
   description: string | null;
   price: string | number;
   currency: string;
   chains: string[];
   createdAt: Date;
+  agentOnline: boolean;
+  agentLastSeen: Date | null;
 };
 
-type ServiceResult = Omit<ServiceRow, "price" | "createdAt" | "id"> & {
+type ServiceResult = Omit<ServiceRow, "price" | "createdAt" | "id" | "agentOnline" | "agentLastSeen"> & {
   price: number;
+  availability: ServiceAvailabilityEvidence;
 };
 
 export function encodeServiceCursor(cursor: ServiceCursor): string {
@@ -245,7 +253,7 @@ function buildConditions(
   maxPrice: number | undefined,
   network: string | null,
 ) {
-  const conditions = [eq(tlsTalos.status, "Active"), isNull(tlsTalos.deletedAt)];
+  const conditions = [or(eq(tlsTalos.status, "Active"), eq(tlsTalos.status, "Draining"))!, isNull(tlsTalos.deletedAt)];
 
   if (selfId) {
     conditions.push(ne(tlsCommerceServices.talosId, selfId));
@@ -293,12 +301,15 @@ function fetchServicesBatch(
       talosId: tlsCommerceServices.talosId,
       talosName: tlsTalos.name,
       talosCategory: tlsTalos.category,
+      talosStatus: tlsTalos.status,
       serviceName: tlsCommerceServices.serviceName,
       description: tlsCommerceServices.description,
       price: tlsCommerceServices.price,
       currency: tlsCommerceServices.currency,
       chains: tlsCommerceServices.chains,
       createdAt: tlsCommerceServices.createdAt,
+      agentOnline: tlsTalos.agentOnline,
+      agentLastSeen: tlsTalos.agentLastSeen,
     })
     .from(tlsCommerceServices)
     .innerJoin(tlsTalos, eq(tlsCommerceServices.talosId, tlsTalos.id))
@@ -353,11 +364,17 @@ function toServiceResult(service: ServiceRow): ServiceResult {
     talosId: service.talosId,
     talosName: service.talosName,
     talosCategory: service.talosCategory,
+    availability: service.talosStatus === "Draining" ? "draining" : "available",
+    acceptsNewWork: service.talosStatus === "Active",
     serviceName: service.serviceName,
     description: service.description,
     price: Number(service.price),
     currency: service.currency,
     chains: service.chains,
+    availability: deriveServiceAvailability(
+      service.agentOnline,
+      service.agentLastSeen,
+    ),
   };
 }
 
