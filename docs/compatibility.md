@@ -32,6 +32,15 @@ pnpm run test:compat
 The checker fails closed: a missing source file or an unparsable version is an
 error, not a skipped check.
 
+## Machine-readable doctor findings
+
+Run `pnpm doctor:json` to emit a JSON object with the stable `exitCode` and a
+`findings` array. Each finding includes a stable `id` and `code`, severity,
+expected requirement, observed version or target state (or `null` when
+unavailable), and a human-readable message. Unrecognized tool output is never
+echoed into the report. Required-tool failures retain exit code `1`;
+optional-tool findings do not change the exit code.
+
 ## Adding support for a new version
 
 1. Change the source of truth first. For example, raise `engines.node` in

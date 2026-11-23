@@ -60,70 +60,117 @@ function probe(run, candidates) {
   return null;
 }
 
-function versionResult(name, output, minimum, hint) {
+function versionResult(name, output, minimum, hint, id) {
+  const expected = `>=${minimum.join(".")}`;
   if (!output) {
-    return { name, ok: false, message: `${name} not found. ${hint}` };
+    return {
+      id,
+      name,
+      ok: false,
+      severity: "error",
+      code: "tool_missing",
+      expected,
+      observed: null,
+      message: `${name} not found. ${hint}`,
+    };
   }
 
   const version = parseVersion(output);
   if (!version) {
-    return { name, ok: false, message: `Could not read the ${name} version from “${output}”. ${hint}` };
+    return {
+      id,
+      name,
+      ok: false,
+      severity: "error",
+      code: "version_unrecognized",
+      expected,
+      observed: null,
+      message: `Could not read the ${name} version; expected ${expected}. ${hint}`,
+    };
   }
 
   const versionText = version.join(".");
   if (compareVersions(version, minimum) < 0) {
     const minimumText = minimum.join(".");
     return {
+      id,
       name,
       ok: false,
+      severity: "error",
+      code: "version_mismatch",
+      expected,
+      observed: versionText,
       message: `${name} ${versionText} is too old; ${minimumText} or newer is required. ${hint}`,
     };
   }
-  return { name, ok: true, message: `${name} ${versionText}` };
+  return {
+    id,
+    name,
+    ok: true,
+    severity: "info",
+    code: "ok",
+    expected,
+    observed: versionText,
+    message: `${name} ${versionText}`,
+  };
 }
 
 export function diagnose({ run = runCommand, platform = process.platform, nodeVersion = process.version } = {}) {
   const results = [];
-  const node = versionResult("Node.js", nodeVersion, MINIMUMS.node, INSTALL_HINTS.node);
+  const node = versionResult("Node.js", nodeVersion, MINIMUMS.node, INSTALL_HINTS.node, "node");
   results.push(node);
 
   const windows = platform === "win32";
   const pnpm = probe(run, windows
     ? [["pnpm", ["--version"]], ["pnpm.cmd", ["--version"]]]
     : [["pnpm", ["--version"]]]);
-  results.push(versionResult("pnpm", pnpm?.output, MINIMUMS.pnpm, INSTALL_HINTS.pnpm));
+  results.push(versionResult("pnpm", pnpm?.output, MINIMUMS.pnpm, INSTALL_HINTS.pnpm, "pnpm"));
 
   const pythonCandidates = windows
     ? [["py", ["-3", "--version"]], ["python", ["--version"]], ["python3", ["--version"]]]
     : [["python3", ["--version"]], ["python", ["--version"]]];
   const python = probe(run, pythonCandidates);
-  results.push(versionResult("Python", python?.output, MINIMUMS.python, INSTALL_HINTS.python));
+  results.push(versionResult("Python", python?.output, MINIMUMS.python, INSTALL_HINTS.python, "python"));
 
   const uv = probe(run, windows
     ? [["uv", ["--version"]], ["uv.exe", ["--version"]]]
     : [["uv", ["--version"]]]);
+  const uvVersion = uv ? parseVersion(uv.output) : null;
+  const uvObserved = uvVersion?.join(".") ?? null;
   results.push({
+    id: "uv",
     name: "uv",
-    ok: Boolean(uv),
-    message: uv ? `uv ${parseVersion(uv.output)?.join(".") ?? uv.output}` : `uv not found. ${INSTALL_HINTS.uv}`,
+    ok: Boolean(uvVersion),
+    severity: uvVersion ? "info" : "error",
+    code: uv ? (uvVersion ? "ok" : "version_unrecognized") : "tool_missing",
+    expected: "installed (any version)",
+    observed: uvObserved,
+    message: uvVersion
+      ? `uv ${uvObserved}`
+      : uv
+        ? `Could not read the uv version; expected an installed version. ${INSTALL_HINTS.uv}`
+        : `uv not found. ${INSTALL_HINTS.uv}`,
   });
 
   const rustc = probe(run, [["rustc", ["--version"]]]);
   results.push({
-    name: "Rust compiler",
-    ...versionResult("Rust compiler", rustc?.output, [1, 0, 0], INSTALL_HINTS.rustc),
+    ...versionResult("Rust compiler", rustc?.output, [1, 0, 0], INSTALL_HINTS.rustc, "rustc"),
   });
   const cargo = probe(run, [["cargo", ["--version"]]]);
   results.push({
-    name: "Cargo",
-    ...versionResult("Cargo", cargo?.output, [1, 0, 0], INSTALL_HINTS.cargo),
+    ...versionResult("Cargo", cargo?.output, [1, 0, 0], INSTALL_HINTS.cargo, "cargo"),
   });
 
   const target = rustc && probe(run, [["rustup", ["target", "list", "--installed"]]]);
   const targetInstalled = target?.output.split(/\s+/).includes("wasm32-unknown-unknown") ?? false;
   results.push({
+    id: "rust_wasm_target",
     name: "Rust Wasm target",
     ok: targetInstalled,
+    severity: targetInstalled ? "info" : "error",
+    code: targetInstalled ? "ok" : "target_missing",
+    expected: "wasm32-unknown-unknown",
+    observed: targetInstalled ? "installed" : "not installed",
     message: targetInstalled
       ? "wasm32-unknown-unknown installed"
       : `wasm32-unknown-unknown is not installed. ${INSTALL_HINTS.rustTarget}`,
@@ -133,19 +180,26 @@ export function diagnose({ run = runCommand, platform = process.platform, nodeVe
     ? [["docker", ["--version"]], ["docker.exe", ["--version"]]]
     : [["docker", ["--version"]]]);
   results.push({
-    name: "Docker",
-    ...versionResult("Docker", docker?.output, [1, 0, 0], INSTALL_HINTS.docker),
+    ...versionResult("Docker", docker?.output, [1, 0, 0], INSTALL_HINTS.docker, "docker"),
   });
 
   const stellar = probe(run, windows
     ? [["stellar", ["--version"]], ["stellar.exe", ["--version"]]]
     : [["stellar", ["--version"]]]);
-  const stellarVersion = stellar?.output.split(/\s+/).slice(0, 2).join(" ");
+  const parsedStellarVersion = stellar ? parseVersion(stellar.output) : null;
+  const stellarVersion = parsedStellarVersion?.join(".") ?? null;
   results.push({
+    id: "stellar",
     name: "Stellar CLI",
     ok: Boolean(stellar),
+    severity: stellar ? "info" : "warning",
+    code: !stellar ? "optional_tool_missing" : parsedStellarVersion ? "ok" : "version_unrecognized",
+    expected: "optional",
+    observed: stellarVersion,
     optional: true,
-    message: stellar ? stellarVersion : `not installed (optional). ${INSTALL_HINTS.stellar}`,
+    message: stellar
+      ? (stellarVersion ? `stellar ${stellarVersion}` : "installed (version unavailable; optional)")
+      : `not installed (optional). ${INSTALL_HINTS.stellar}`,
   });
 
   return {
@@ -163,9 +217,13 @@ export function formatReport({ results }) {
   return lines.join("\n");
 }
 
-function main() {
+export function formatJsonReport({ results, exitCode }) {
+  return JSON.stringify({ exitCode, findings: results }, null, 2);
+}
+
+function main(args = process.argv.slice(2)) {
   const report = diagnose();
-  console.log(formatReport(report));
+  console.log(args.includes("--json") ? formatJsonReport(report) : formatReport(report));
   process.exitCode = report.exitCode;
 }
 

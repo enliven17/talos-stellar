@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "pnpm --dir web dev",
     "doctor": "node scripts/doctor.mjs",
+    "doctor:json": "node scripts/doctor.mjs --json",
     "doctor:test": "node --test scripts/doctor.test.mjs",
     "artifacts:check": "node scripts/check-package-artifacts.mjs",
     "test:package-artifacts": "node --test scripts/check-package-artifacts.test.mjs",
