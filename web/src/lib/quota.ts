@@ -143,12 +143,17 @@ export interface QuotaResult {
   resetAt: number;
   /** The resource that was checked. */
   resource: QuotaResource;
-  /** Window granularity for this quota (hourly/daily/monthly). */
-  windowSize: WindowSize;
-  /** Source of the applied policy: "agent" for agent-specific override, "platform" for platform default. */
-  policy: "agent" | "platform";
-  /** Human-readable explanation of the quota decision. */
-  explanation: string;
+  /**
+   * Whether this call consumed a unit by incrementing tls_quota_usage.
+   *
+   *   – disabled quotas: false (the no-write path is preserved)
+   *   – enabled quotas, under or at the limit: true
+   *   – enabled quotas, exhausted (ok=false): true — the counter is
+   *     incremented before the limit check, so a rejected attempt is still
+   *     counted and surfaces as `used` on the decision
+   *   – readQuotaUsage: false (read-only)
+   */
+  incremented: boolean;
 }
 
 /** Input accepted by response and header helpers, including unknown/null reset times. */
@@ -323,7 +328,9 @@ export async function resolveQuotaConfig(
  * current window, then check whether the new count exceeds the limit.
  *
  * If quota enforcement is disabled for this resource the function returns
- * `ok: true` immediately without touching tls_quota_usage (zero overhead).
+ * `ok: true` immediately without touching tls_quota_usage (zero overhead) and
+ * reports `incremented: false`.  Enabled quotas always increment exactly once,
+ * so `incremented` is true for admitted, at-limit, and exhausted decisions.
  *
  * @param db       Drizzle DB instance
  * @param talosId  Agent being checked
@@ -347,6 +354,7 @@ export async function checkAndIncrementQuota(
   const policy = config.talosId === talosId ? "agent" : "platform";
 
   if (!config.enabled) {
+    // No-write path: disabled quotas must not touch tls_quota_usage.
     return {
       ok: true,
       limit: config.maxCount,
@@ -354,9 +362,7 @@ export async function checkAndIncrementQuota(
       used: 0,
       resetAt: boundaries.resetAt,
       resource,
-      windowSize: config.windowSize,
-      policy,
-      explanation: `Quota disabled (${policy} default). No enforcement applied.`,
+      incremented: false,
     };
   }
 
@@ -412,11 +418,17 @@ export async function checkAndIncrementQuota(
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
-  const explanation = ok
-    ? `Used ${used} of ${config.maxCount} (${policy} ${config.windowSize} quota). ${remaining} remaining.`
-    : `Quota exceeded: used ${used} of ${config.maxCount} (${policy} ${config.windowSize} quota). Resets at ${new Date(resetAt).toISOString()}.`;
-
-  return { ok, limit: config.maxCount, remaining, used, resetAt, resource, windowSize: config.windowSize, policy, explanation };
+  // The upsert above always runs for enabled quotas, including exhausted
+  // decisions, so the unit is reported as consumed in every case.
+  return {
+    ok,
+    limit: config.maxCount,
+    remaining,
+    used,
+    resetAt,
+    resource,
+    incremented: true,
+  };
 }
 
 /**
@@ -458,13 +470,16 @@ export async function readQuotaUsage(
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
-  const explanation = !config.enabled
-    ? `Quota disabled (${policy} default). No enforcement applied.`
-    : ok
-    ? `Used ${used} of ${config.maxCount} (${policy} ${config.windowSize} quota). ${remaining} remaining.`
-    : `Quota exceeded: used ${used} of ${config.maxCount} (${policy} ${config.windowSize} quota). Resets at ${new Date(resetAt).toISOString()}.`;
-
-  return { ok, limit: config.maxCount, remaining, used, resetAt, resource, windowSize: config.windowSize, policy, explanation };
+  // Read-only: usage is never incremented by this helper.
+  return {
+    ok,
+    limit: config.maxCount,
+    remaining,
+    used,
+    resetAt,
+    resource,
+    incremented: false,
+  };
 }
 
 // ─── Response helpers ────────────────────────────────────────────────────────
@@ -486,7 +501,7 @@ export function quotaExceededResponse(
       resource: result.resource,
       limit: result.limit,
       resetAt: new Date(result.resetAt).toISOString(),
-      ...buildQuotaExplanation(result),
+      incremented: result.incremented,
     }),
     {
       status: 429,
@@ -502,7 +517,7 @@ export function quotaExceededResponse(
 /**
  * Return the X-Quota-* header set for a given QuotaResult.
  * Attach these to 200/201 responses so clients can monitor their usage.
- * Omits `X-Quota-Reset` when the reset timestamp is unknown or invalid.
+ * X-Quota-Incremented reports whether the paired decision consumed a unit.
  */
 export function buildQuotaHeaders(result: QuotaHeaderInput): Record<string, string> {
   const headers: Record<string, string> = {
@@ -510,8 +525,7 @@ export function buildQuotaHeaders(result: QuotaHeaderInput): Record<string, stri
     "X-Quota-Remaining": String(result.remaining),
     "X-Quota-Used": String(result.used),
     "X-Quota-Resource": result.resource,
-    "X-Quota-Window": result.windowSize,
-    "X-Quota-Policy": result.policy,
+    "X-Quota-Incremented": String(result.incremented),
   };
   const resetSeconds = formatResetEpochSeconds(result.resetAt);
   if (resetSeconds !== null) {
