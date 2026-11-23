@@ -139,9 +139,20 @@ function shortAddress(address: string): string {
 }
 
 export function AgentLifecyclePanel({ talosId }: { talosId: string }) {
-  const { isConnected, address, connect, signMessage } = useWallet();
+  const {
+    isConnected,
+    address,
+    network,
+    connect,
+    refreshAddress,
+    signMessage,
+  } = useWallet();
+  const walletIdentity = `${network}:${address ?? "anonymous"}`;
+  const walletIdentityRef = useRef(walletIdentity);
+  walletIdentityRef.current = walletIdentity;
 
   const [snapshot, setSnapshot] = useState<LifecycleSnapshot | null>(null);
+  const [snapshotIdentity, setSnapshotIdentity] = useState<string | null>(null);
   const [olderEvents, setOlderEvents] = useState<LifecycleEvent[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -154,6 +165,7 @@ export function AgentLifecyclePanel({ talosId }: { talosId: string }) {
   const confirmInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async () => {
+    const requestIdentity = walletIdentity;
     const params = new URLSearchParams({ limit: "10" });
     if (address) params.set("viewer", address);
 
@@ -161,19 +173,41 @@ export function AgentLifecyclePanel({ talosId }: { talosId: string }) {
       const res = await fetch(`/api/talos/${talosId}/lifecycle?${params}`, { cache: "no-store" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        setError({ code: body.code ?? "LOAD_FAILED", message: body.error ?? "Could not load lifecycle" });
+        if (walletIdentityRef.current === requestIdentity) {
+          setError({ code: body.code ?? "LOAD_FAILED", message: body.error ?? "Could not load lifecycle" });
+        }
         return;
       }
       const data: LifecycleSnapshot = await res.json();
+      if (walletIdentityRef.current !== requestIdentity) return;
       setSnapshot(data);
+      setSnapshotIdentity(requestIdentity);
       setOlderEvents([]);
       setCursor(data.nextCursor);
       setNow(Date.now());
       setError(null);
+    } catch (err) {
+      if (walletIdentityRef.current === requestIdentity) {
+        setError({
+          code: "LOAD_FAILED",
+          message: err instanceof Error ? err.message : "Could not load lifecycle",
+        });
+      }
     } finally {
-      setLoading(false);
+      if (walletIdentityRef.current === requestIdentity) setLoading(false);
     }
-  }, [talosId, address]);
+  }, [talosId, address, walletIdentity]);
+
+  useEffect(() => {
+    setSnapshot(null);
+    setSnapshotIdentity(null);
+    setOlderEvents([]);
+    setCursor(null);
+    setConfirming(null);
+    setConfirmText("");
+    setError(null);
+    setLoading(true);
+  }, [walletIdentity]);
 
   useEffect(() => {
     load();
@@ -216,14 +250,58 @@ export function AgentLifecyclePanel({ talosId }: { talosId: string }) {
   const submitAction = useCallback(
     async (action: LifecycleActionName) => {
       if (!address || !snapshot) return;
+      const requestIdentity = walletIdentity;
       setPending(action);
       setError(null);
 
       try {
+        const refreshedAddress = await refreshAddress();
+        if (
+          refreshedAddress !== address ||
+          walletIdentityRef.current !== requestIdentity
+        ) {
+          setError({
+            code: "WALLET_CHANGED",
+            message: "The connected wallet changed. Refresh the lifecycle state before acting.",
+          });
+          return;
+        }
+
+        const params = new URLSearchParams({ limit: "10", viewer: address });
+        const freshRes = await fetch(`/api/talos/${talosId}/lifecycle?${params}`, {
+          cache: "no-store",
+        });
+        const freshBody = await freshRes.json().catch(() => ({}));
+        if (!freshRes.ok) {
+          setError({
+            code: freshBody.code ?? "AUTHORIZATION_REFRESH_FAILED",
+            message: freshBody.error ?? "Could not verify the current wallet's lifecycle permissions.",
+          });
+          return;
+        }
+        const freshSnapshot = freshBody as LifecycleSnapshot;
+        if (walletIdentityRef.current !== requestIdentity) return;
+        setSnapshot(freshSnapshot);
+        setSnapshotIdentity(requestIdentity);
+        if (!freshSnapshot.allowedActions.includes(action)) {
+          setError({
+            code: "ACTION_NOT_ALLOWED",
+            message: "This action is no longer available for the connected wallet or current lifecycle state.",
+          });
+          return;
+        }
+
         // The signed message binds the agent, the action, and a timestamp, so a
         // captured signature cannot be replayed for a different transition.
-        const message = `talos:${talosId}:lifecycle:${action}:${Date.now()}`;
+        const message = `talos:${talosId}:lifecycle:${action}:${network}:${Date.now()}`;
         const signature = await signMessage(message);
+        if (walletIdentityRef.current !== requestIdentity) {
+          setError({
+            code: "WALLET_CHANGED",
+            message: "The connected wallet or Stellar network changed. The action was cancelled.",
+          });
+          return;
+        }
 
         const payload: Record<string, unknown> = { confirmed: true };
         if (action === "pause") {
@@ -235,9 +313,9 @@ export function AgentLifecyclePanel({ talosId }: { talosId: string }) {
         if (action === "retire") {
           payload.reason = "Retirement approved by governance";
           payload.drainJobs = true;
-          payload.proposalId = snapshot.pendingProposals[0]?.id ?? "";
+          payload.proposalId = freshSnapshot.pendingProposals[0]?.id ?? "";
         }
-        if (action === "activate") payload.proposalId = snapshot.pendingProposals[0]?.id ?? "";
+        if (action === "activate") payload.proposalId = freshSnapshot.pendingProposals[0]?.id ?? "";
 
         const res = await fetch(`/api/talos/${talosId}/lifecycle`, {
           method: "POST",
@@ -266,7 +344,7 @@ export function AgentLifecyclePanel({ talosId }: { talosId: string }) {
         setConfirmText("");
       }
     },
-    [address, snapshot, talosId, signMessage, load],
+    [address, snapshot, walletIdentity, refreshAddress, talosId, signMessage, load],
   );
 
   const onActionClick = useCallback(
@@ -282,7 +360,9 @@ export function AgentLifecyclePanel({ talosId }: { talosId: string }) {
     [submitAction],
   );
 
-  if (loading) {
+  const snapshotMatchesWallet = snapshotIdentity === walletIdentity;
+
+  if (loading || (snapshot !== null && !snapshotMatchesWallet)) {
     return (
       <section aria-busy="true" aria-label="Agent lifecycle" className="bg-surface border border-border p-5">
         <p className="text-sm text-muted">Loading lifecycle…</p>
