@@ -118,6 +118,7 @@ All configuration is via environment variables:
 | `WEBHOOK_BACKOFF_MAX_MS` | `60000` | Backoff ceiling (ms) |
 | `WEBHOOK_DELIVERY_TIMEOUT_MS` | `10000` | HTTP request timeout (ms) |
 | `WEBHOOK_MAX_PAYLOAD_BYTES` | `64000` | Maximum payload size (bytes) |
+| `WEBHOOK_MAX_RESPONSE_BYTES` | `10000` | Maximum response-body capture size (bytes) |
 | `WEBHOOK_LEASE_TTL_SECONDS` | `300` | Delivery lease duration (s) |
 | `WEBHOOK_HEARTBEAT_EXTEND_SECONDS` | `300` | Heartbeat extension (s) |
 | `WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS` | `600` | Bounded challenge token expiration window (s) |

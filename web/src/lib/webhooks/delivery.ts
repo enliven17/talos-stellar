@@ -31,8 +31,7 @@ import {
   DEFAULT_MAX_ATTEMPTS,
   DELIVERY_TIMEOUT_MS,
   MAX_PAYLOAD_BYTES,
-  WEBHOOK_KEY_ID_HEADER,
-  WEBHOOK_SIGNATURE_HEADER,
+  MAX_RESPONSE_BYTES,
 } from "./config";
 import { isWebhookDeliveryEnabled } from "./config";
 import { safeFetch } from "@/lib/security/ssrf";
@@ -271,12 +270,7 @@ export async function attemptDelivery(
 
     clearTimeout(timeoutId);
     statusCode = response.status;
-    responseBody = await response.text().catch(() => null);
-
-    // Truncate response body for storage
-    if (responseBody && responseBody.length > 512) {
-      responseBody = responseBody.slice(0, 512) + "...";
-    }
+    responseBody = await readBoundedResponseBody(response, MAX_RESPONSE_BYTES).catch(() => null);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Redact sensitive info from errors
@@ -451,4 +445,65 @@ function reconstructPayload(payloadHash: string): string {
   }
 
   return JSON.stringify({ event: "webhook_retry" });
+}
+
+/**
+ * Reads at most maxBytes from a Response body stream.
+ *
+ * If the response body exceeds maxBytes, reading is halted, the stream is cancelled,
+ * and the captured prefix is returned with a trailing ellipsis indicator "...".
+ * If the response body is empty or absent, returns null.
+ */
+export async function readBoundedResponseBody(
+  response: Response,
+  maxBytes: number = MAX_RESPONSE_BYTES,
+): Promise<string | null> {
+  if (!response.body) {
+    const text = await response.text().catch(() => "");
+    if (!text) return null;
+    const buf = Buffer.from(text, "utf8");
+    if (buf.byteLength > maxBytes) {
+      return buf.subarray(0, maxBytes).toString("utf8") + "...";
+    }
+    return text;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  let truncated = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        if (totalBytes + value.byteLength > maxBytes) {
+          const needed = maxBytes - totalBytes;
+          if (needed > 0) {
+            chunks.push(value.subarray(0, needed));
+            totalBytes += needed;
+          }
+          truncated = true;
+          await reader.cancel("response_body_limit_exceeded").catch(() => {});
+          break;
+        } else {
+          chunks.push(value);
+          totalBytes += value.byteLength;
+        }
+      }
+    }
+  } catch {
+    // If stream reading fails or is cancelled, preserve whatever was captured
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (totalBytes === 0 && !truncated) {
+    return null;
+  }
+
+  const fullBuffer = Buffer.concat(chunks, totalBytes);
+  const text = fullBuffer.toString("utf8");
+  return truncated ? text + "..." : text;
 }

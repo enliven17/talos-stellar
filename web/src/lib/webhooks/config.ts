@@ -119,6 +119,13 @@ export const MAX_PAYLOAD_BYTES = parsePositiveIntEnv(
   { min: 1, max: 10_485_760 },
 );
 
+/** Maximum response body size (bytes) to capture from outbound webhook delivery responses. */
+export const MAX_RESPONSE_BYTES = parsePositiveIntEnv(
+  "WEBHOOK_MAX_RESPONSE_BYTES",
+  10_000,
+  { min: 1, max: 10_485_760 },
+);
+
 // ─── Lease settings (same pattern as commerce jobs) ──────────────
 
 /** Default lease TTL (seconds) for a claimed delivery. */
