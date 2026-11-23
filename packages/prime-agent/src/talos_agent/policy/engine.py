@@ -28,13 +28,16 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
+from talos_agent.policy.patterns import compile_glob
 from talos_agent.policy.schema import (
     ActionSpec,
     ConditionTrace,
     MatchCondition,
     Policy,
+    PolicyException,
     PolicyDecision,
     PolicyDecisionTrace,
     PolicyResult,
@@ -100,12 +103,7 @@ def _evaluate_condition(condition: MatchCondition, spec: ActionSpec) -> bool:
         except re.error:
             return False
     elif op == "glob":
-        # Explicit wildcard matching using fnmatch-style logic
-        # This makes wildcard behavior predictable and explicit
-        try:
-            return _match_glob(str(expected), str(actual))
-        except Exception:
-            return False
+        return _match_glob(expected, str(actual))
 
     # Unknown operator — fail closed (condition does not match)
     logger.debug("Unknown condition operator: %s (rule will not match)", op)
@@ -113,57 +111,8 @@ def _evaluate_condition(condition: MatchCondition, spec: ActionSpec) -> bool:
 
 
 def _match_glob(pattern: str, text: str) -> bool:
-    """Match text against a glob pattern with explicit wildcard semantics.
-
-    Supports:
-    - ``*``: matches any sequence of characters (except path separators)
-    - ``?``: matches any single character
-    - ``[seq]``: matches any character in seq
-    - ``[!seq]``: matches any character not in seq
-
-    This implementation is explicit about wildcard behavior to ensure
-    predictability for contributors and operators.
-    """
-    # Convert glob pattern to regex
-    # Escape special regex characters first, then replace glob wildcards
-    regex_parts = []
-    i = 0
-    while i < len(pattern):
-        char = pattern[i]
-        if char == "*":
-            regex_parts.append("[^/]*")
-        elif char == "?":
-            regex_parts.append("[^/]")
-        elif char == "[":
-            # Handle character class
-            j = i + 1
-            if j < len(pattern) and pattern[j] == "!":
-                regex_parts.append("[^")
-                j += 1
-            else:
-                regex_parts.append("[")
-            # Find closing bracket
-            while j < len(pattern) and pattern[j] != "]":
-                regex_parts.append(pattern[j])
-                j += 1
-            if j < len(pattern):
-                regex_parts.append("]")
-                i = j
-            else:
-                # No closing bracket, treat as literal
-                regex_parts.append("[")
-        else:
-            # Escape regex special characters
-            if char in r"\.^$+{}()|":
-                regex_parts.append("\\")
-            regex_parts.append(char)
-        i += 1
-
-    regex = "^" + "".join(regex_parts) + "$"
-    try:
-        return bool(re.match(regex, text))
-    except re.error:
-        return False
+    """Match text against a validated policy glob pattern."""
+    return compile_glob(pattern).fullmatch(text) is not None
 
 
 def _trace_condition(condition: MatchCondition, spec: ActionSpec) -> ConditionTrace:
@@ -245,6 +194,7 @@ class PolicyEngine:
 
     def __init__(self) -> None:
         self._policies: tuple[Policy, ...] = ()
+        self._exceptions: dict[tuple[str, str], PolicyException] = {}
         self._enabled: bool = False
         self._evaluation_count: int = 0
         self._deny_count: int = 0
@@ -288,12 +238,32 @@ class PolicyEngine:
         Policies are sorted by (priority descending, name ascending) and
         stored as an immutable tuple so readers see a consistent snapshot.
         """
+        seen_rule_ids: dict[str, str] = {}
+        for policy in policies:
+            for rule in policy.rules:
+                rule_id = rule.rule_id.strip()
+                if not rule_id:
+                    raise ValueError(
+                        f"Policy '{policy.name}' contains a rule with an empty rule identifier"
+                    )
+                if rule_id in seen_rule_ids:
+                    raise ValueError(
+                        f"Duplicate rule identifier '{rule_id}' in policies "
+                        f"'{seen_rule_ids[rule_id]}' and '{policy.name}'"
+                    )
+                seen_rule_ids[rule_id] = policy.name
+
         self._policies = tuple(
             sorted(
                 policies,
                 key=lambda p: (-p.priority, p.name),
             )
         )
+        self._exceptions = {
+            (policy.name, exception.rule_id): exception
+            for policy in self._policies
+            for exception in policy.exceptions
+        }
         logger.info(
             "PolicyEngine loaded %d policies (%d enabled)",
             len(self._policies),
@@ -302,7 +272,12 @@ class PolicyEngine:
 
     # ── Evaluation ────────────────────────────────────────────────────────
 
-    def evaluate(self, spec: ActionSpec) -> PolicyResult:
+    def evaluate(
+        self,
+        spec: ActionSpec,
+        *,
+        now: datetime | None = None,
+    ) -> PolicyResult:
         """Evaluate all loaded policies against *spec* and return a decision.
 
         Evaluation is pure and deterministic.  The result includes a SHA-256
@@ -313,6 +288,9 @@ class PolicyEngine:
         ``APPROVE`` with an evidence note and a disabled-engine trace.
         """
         self._evaluation_count += 1
+        evaluation_time = now or datetime.now(timezone.utc)
+        if evaluation_time.tzinfo is None or evaluation_time.utcoffset() is None:
+            raise ValueError("policy evaluation now must be timezone-aware")
 
         if not self._enabled:
             trace = PolicyDecisionTrace.disabled(spec.action)
@@ -386,6 +364,33 @@ class PolicyEngine:
                         )
                     )
                     continue
+
+                exception = self._exceptions.get((policy.name, rule.rule_id))
+                if exception is not None:
+                    if exception.is_active(evaluation_time):
+                        all_results[-1]["exception"] = "applied"
+                        steps.append(
+                            RuleTraceStep(
+                                policy=policy.name,
+                                rule_id=rule.rule_id,
+                                severity=rule.severity.value,
+                                matched=True,
+                                decision="not_applicable",
+                                reason="Time-bounded policy exception applied",
+                                conditions=cond_traces,
+                                effect="exception_applied",
+                            )
+                        )
+                        evidence.append(
+                            f"[{policy.name}/{rule.rule_id}] exception applied "
+                            f"by {exception.actor}: {exception.reason}"
+                        )
+                        continue
+                    all_results[-1]["exception"] = "expired"
+                    evidence.append(
+                        f"[{policy.name}/{rule.rule_id}] exception expired; "
+                        "original policy effect enforced"
+                    )
 
                 # Rule matched — record violation
                 violated.append(rule)

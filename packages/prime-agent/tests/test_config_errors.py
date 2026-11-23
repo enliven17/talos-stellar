@@ -32,3 +32,23 @@ def test_safe_config_error_preserves_non_secret_context_without_value():
 
     assert "api_key" in message
     assert "not-a-number" not in message
+
+
+def test_scheduler_concurrency_setting_is_bounded(monkeypatch):
+    from talos_agent.config import Settings
+
+    monkeypatch.delenv("SCHEDULER_MAX_CONCURRENT_TASKS", raising=False)
+    assert Settings(_env_file=None).scheduler_max_concurrent_tasks == 4
+
+    for value in (1, 16):
+        monkeypatch.setenv("SCHEDULER_MAX_CONCURRENT_TASKS", str(value))
+        assert Settings(_env_file=None).scheduler_max_concurrent_tasks == value
+
+    for value in (0, 17):
+        monkeypatch.setenv("SCHEDULER_MAX_CONCURRENT_TASKS", str(value))
+        try:
+            Settings(_env_file=None)
+        except ValidationError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError(f"expected concurrency limit {value} to be rejected")

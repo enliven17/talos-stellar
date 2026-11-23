@@ -36,10 +36,11 @@ export function loadReconcilerConfig(): ReconcilerConfig {
 
     concurrencyLimit: parseIntEnv("RECONCILER_CONCURRENCY_LIMIT", 5),
 
-    staleObservationThreshold: parseIntEnv(
-      "RECONCILER_STALE_OBSERVATION_THRESHOLD",
-      parseInt(process.env.RECONCILER_MAX_LEDGER_GAP || "120", 10) || 120,
-    ),
+    networkPassphrase:
+      process.env.STELLAR_NETWORK_PASSPHRASE ??
+      (process.env.STELLAR_NETWORK === "mainnet"
+        ? "Public Global Stellar Network ; September 2015"
+        : "Test SDF Network ; September 2015"),
   };
 }
 

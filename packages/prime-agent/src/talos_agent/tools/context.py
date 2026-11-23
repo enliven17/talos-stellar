@@ -52,6 +52,8 @@ class ToolContext:
     stellar_kit: Any = None
     claimed_jobs: dict[str, int] = field(default_factory=dict)
     claimed_jobs_lock: asyncio.Lock | None = None
+    budget_reserved_units: int = 0
+    budget_reservation_lock: asyncio.Lock | None = None
 
     def update(
         self,
@@ -124,6 +126,8 @@ _LEGACY_GLOBAL = {
     "stellar_kit": "_stellar_kit",
     "claimed_jobs": "_claimed_jobs",
     "claimed_jobs_lock": "_claimed_jobs_lock",
+    "budget_reserved_units": "_budget_reserved_units",
+    "budget_reservation_lock": "_budget_reservation_lock",
 }
 
 

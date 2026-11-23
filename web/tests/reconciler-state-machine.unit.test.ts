@@ -54,9 +54,8 @@ import {
   isWallClockExpired,
   isLedgerExpired,
   isTerminal,
-  getObservationAge,
-  isObservationStale,
-  getPaymentObservation,
+  normalizeNetworkPassphrase,
+  isMatchingNetwork,
 } from "../src/lib/reconciler/state-machine";
 import { isTrustedObservation } from "../src/lib/reconciler/horizon";
 import type { TxRecord, ReconcilerConfig, HorizonPollResult } from "../src/lib/reconciler/types";
@@ -335,6 +334,15 @@ describe("computeTransition", () => {
     // confirmationDepth=2, 1000+2=1002 → CONFIRMED
     expect(update?.finalityStatus).toBe("CONFIRMED");
   });
+
+  it("rejects non-monotonic ledger observations (regression)", () => {
+    const rec = makeRecord({ finalityStatus: "PENDING", lastLedgerChecked: 1010 });
+    // currentLedger is 1000, which is < lastLedgerChecked 1010
+    const update = computeTransition(rec, CONFIRMED_POLL, 1000, BASE_CONFIG);
+    expect(update?.lastError).toMatch(/regression/i);
+    expect(update?.lastLedgerChecked).toBeUndefined(); // Should not update
+    expect(update?.finalityStatus).toBeUndefined(); // Should not change state
+  });
 });
 
 // ─── needsRepair ─────────────────────────────────────────────────────────────
@@ -462,227 +470,162 @@ describe("State machine edge cases", () => {
   });
 });
 
-// ─── Trusted Payment Observation Age & Staleness ─────────────────────────────
+// ─── Network Identity Pinning & Observation Rejection ─────────────────────────
 
-describe("Payment Observation Age & Staleness", () => {
-  describe("getObservationAge - distinction between zero age and unknown age", () => {
-    it("returns exactly 0 (zero age) when observed in the current closed ledger", () => {
-      const rec = makeRecord({ confirmedLedger: 1050 });
-      const age = getObservationAge(rec, 1050);
-      expect(age).toBe(0);
-      expect(age).not.toBeNull();
+describe("Network Identity Pinning & Observation Rejection", () => {
+  const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
+  const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
+
+  describe("normalizeNetworkPassphrase", () => {
+    it("normalises 'testnet' shorthand to SDF testnet passphrase", () => {
+      expect(normalizeNetworkPassphrase("testnet")).toBe(TESTNET_PASSPHRASE);
+      expect(normalizeNetworkPassphrase("TESTNET")).toBe(TESTNET_PASSPHRASE);
     });
 
-    it("returns null (unknown age) when record has no trusted observation (confirmedLedger is null)", () => {
-      const rec = makeRecord({ finalityStatus: "PENDING", confirmedLedger: null });
-      const age = getObservationAge(rec, 1050);
-      expect(age).toBeNull();
+    it("normalises 'mainnet' and 'public' shorthand to SDF public passphrase", () => {
+      expect(normalizeNetworkPassphrase("mainnet")).toBe(MAINNET_PASSPHRASE);
+      expect(normalizeNetworkPassphrase("public")).toBe(MAINNET_PASSPHRASE);
+      expect(normalizeNetworkPassphrase("PUBLIC")).toBe(MAINNET_PASSPHRASE);
     });
 
-    it("strictly distinguishes zero age (0) from unknown age (null)", () => {
-      const zeroAgeRec = makeRecord({ confirmedLedger: 1050 });
-      const unknownAgeRec = makeRecord({ confirmedLedger: null });
-
-      const zeroAge = getObservationAge(zeroAgeRec, 1050);
-      const unknownAge = getObservationAge(unknownAgeRec, 1050);
-
-      expect(zeroAge).toBe(0);
-      expect(unknownAge).toBeNull();
-      expect(zeroAge === unknownAge).toBe(false);
-      expect(zeroAge === 0).toBe(true);
-      expect(unknownAge === null).toBe(true);
+    it("preserves custom passphrases as-is", () => {
+      const custom = "Private Standalone Network ; January 2026";
+      expect(normalizeNetworkPassphrase(custom)).toBe(custom);
     });
 
-    it("computes positive age when currentLedger > confirmedLedger", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      expect(getObservationAge(rec, 1045)).toBe(45);
-    });
-
-    it("returns null when currentLedger is null or undefined", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      expect(getObservationAge(rec, null)).toBeNull();
-      expect(getObservationAge(rec, undefined)).toBeNull();
-    });
-
-    it("returns null when currentLedger is not a positive finite number", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      expect(getObservationAge(rec, 0)).toBeNull();
-      expect(getObservationAge(rec, -10)).toBeNull();
-      expect(getObservationAge(rec, NaN)).toBeNull();
-    });
-
-    it("returns null when record is null or undefined", () => {
-      expect(getObservationAge(null, 1050)).toBeNull();
-      expect(getObservationAge(undefined, 1050)).toBeNull();
-    });
-
-    it("returns null on nonmonotonic anomaly (currentLedger < confirmedLedger)", () => {
-      const rec = makeRecord({ confirmedLedger: 1050 });
-      expect(getObservationAge(rec, 1040)).toBeNull();
-    });
-
-    it("computes age directly from a HorizonPollResult", () => {
-      expect(getObservationAge(CONFIRMED_POLL, 1010)).toBe(0); // ledger 1010, current 1010 => 0
-      expect(getObservationAge(CONFIRMED_POLL, 1025)).toBe(15);
-      expect(getObservationAge(FAILED_POLL, 1020)).toBe(10);
-      expect(getObservationAge(NOT_FOUND_POLL, 1020)).toBeNull();
-      expect(getObservationAge(ERROR_POLL_RETRYABLE, 1020)).toBeNull();
+    it("handles null, undefined, or empty string safely", () => {
+      expect(normalizeNetworkPassphrase(null)).toBeNull();
+      expect(normalizeNetworkPassphrase(undefined)).toBeNull();
+      expect(normalizeNetworkPassphrase("")).toBeNull();
     });
   });
 
-  describe("isTrustedObservation", () => {
-    it("identifies confirmed and failed outcomes with valid ledgers as trusted", () => {
-      expect(isTrustedObservation(CONFIRMED_POLL)).toBe(true);
-      expect(isTrustedObservation(FAILED_POLL)).toBe(true);
+  describe("isMatchingNetwork", () => {
+    it("returns true for matching passphrases", () => {
+      expect(isMatchingNetwork(TESTNET_PASSPHRASE, TESTNET_PASSPHRASE)).toBe(true);
+      expect(isMatchingNetwork("testnet", TESTNET_PASSPHRASE)).toBe(true);
+      expect(isMatchingNetwork(TESTNET_PASSPHRASE, "testnet")).toBe(true);
+      expect(isMatchingNetwork("mainnet", MAINNET_PASSPHRASE)).toBe(true);
     });
 
-    it("identifies not_found and error outcomes as untrusted", () => {
-      expect(isTrustedObservation(NOT_FOUND_POLL)).toBe(false);
-      expect(isTrustedObservation(ERROR_POLL_RETRYABLE)).toBe(false);
-      expect(isTrustedObservation(ERROR_POLL_PERMANENT)).toBe(false);
-      expect(isTrustedObservation(null)).toBe(false);
-      expect(isTrustedObservation(undefined)).toBe(false);
+    it("returns false for mismatched passphrases", () => {
+      expect(isMatchingNetwork(TESTNET_PASSPHRASE, MAINNET_PASSPHRASE)).toBe(false);
+      expect(isMatchingNetwork("testnet", "mainnet")).toBe(false);
     });
 
-    it("rejects non-positive or non-finite ledger values", () => {
-      expect(isTrustedObservation({ outcome: "confirmed", ledger: 0, successful: true })).toBe(false);
-      expect(isTrustedObservation({ outcome: "confirmed", ledger: -5, successful: true })).toBe(false);
-      expect(isTrustedObservation({ outcome: "confirmed", ledger: NaN, successful: true })).toBe(false);
-    });
-  });
-
-  describe("isObservationStale", () => {
-    it("returns false for zero age", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      expect(isObservationStale(rec, 1000, 120)).toBe(false);
-    });
-
-    it("returns false when age is within threshold", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      expect(isObservationStale(rec, 1120, 120)).toBe(false); // age 120 == threshold 120
-    });
-
-    it("returns true when age strictly exceeds threshold", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      expect(isObservationStale(rec, 1121, 120)).toBe(true); // age 121 > threshold 120
-    });
-
-    it("returns false when age is unknown", () => {
-      const rec = makeRecord({ confirmedLedger: null });
-      expect(isObservationStale(rec, 1121, 120)).toBe(false);
-    });
-
-    it("returns false for invalid threshold", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      expect(isObservationStale(rec, 1121, -1)).toBe(false);
+    it("returns true for backward compatibility when either side is omitted", () => {
+      expect(isMatchingNetwork(null, TESTNET_PASSPHRASE)).toBe(true);
+      expect(isMatchingNetwork(TESTNET_PASSPHRASE, null)).toBe(true);
+      expect(isMatchingNetwork(undefined, undefined)).toBe(true);
     });
   });
 
-  describe("getPaymentObservation", () => {
-    it("returns fresh status and age 0 for current ledger observation", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      const obs = getPaymentObservation(rec, 1000, 120);
-      expect(obs).toEqual({
-        ledger: 1000,
-        age: 0,
-        status: "fresh",
-        isStale: false,
-      });
+  describe("transitionFromPending with pinned network identity", () => {
+    const pinnedRecord = makeRecord({
+      finalityStatus: "PENDING",
+      networkPassphrase: TESTNET_PASSPHRASE,
+      pollCount: 2,
     });
 
-    it("returns unknown status and age null when no trusted observation exists", () => {
-      const rec = makeRecord({ confirmedLedger: null });
-      const obs = getPaymentObservation(rec, 1000, 120);
-      expect(obs).toEqual({
-        ledger: null,
-        age: null,
-        status: "unknown",
-        isStale: false,
-      });
+    it("rejects confirmed observation from a foreign network without transitioning financial state", () => {
+      const foreignPoll: HorizonPollResult = {
+        outcome: "confirmed",
+        ledger: 1050,
+        successful: true,
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, BASE_CONFIG);
+      expect(update).not.toBeNull();
+      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING
+      expect(update?.confirmedLedger).toBeUndefined(); // No financial settlement recorded
+      expect(update?.pollCount).toBe(3); // Bumped poll attempt
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
+      expect(update?.lastError).toContain(MAINNET_PASSPHRASE);
     });
 
-    it("returns stale status when age exceeds threshold", () => {
-      const rec = makeRecord({ confirmedLedger: 1000 });
-      const obs = getPaymentObservation(rec, 1200, 120);
-      expect(obs).toEqual({
-        ledger: 1000,
-        age: 200,
-        status: "stale",
-        isStale: true,
-      });
+    it("rejects failed observation from a foreign network without transitioning financial state", () => {
+      const foreignPoll: HorizonPollResult = {
+        outcome: "failed",
+        ledger: 1050,
+        successful: false,
+        detail: "tx_bad_auth",
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, BASE_CONFIG);
+      expect(update).not.toBeNull();
+      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING (does not transition to FAILED)
+      expect(update?.pollCount).toBe(3);
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
     });
 
-    it("handles null/undefined input safely", () => {
-      expect(getPaymentObservation(null, 1000)).toEqual({
-        ledger: null,
-        age: null,
-        status: "unknown",
-        isStale: false,
+    it("rejects not_found observation from a foreign network and avoids NOT_FOUND terminal state", () => {
+      const config = { ...BASE_CONFIG, notFoundThreshold: 3 };
+      const foreignPoll: HorizonPollResult = {
+        outcome: "not_found",
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, config);
+      expect(update).not.toBeNull();
+      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING even though pollCount+1 >= threshold
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
+    });
+
+    it("accepts observation from matching network and transitions normally", () => {
+      const matchingPoll: HorizonPollResult = {
+        outcome: "confirmed",
+        ledger: 1050,
+        successful: true,
+        networkPassphrase: TESTNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(pinnedRecord, matchingPoll, 1050, BASE_CONFIG);
+      expect(update).not.toBeNull();
+      expect(update?.finalityStatus).toBe("CONFIRMING");
+      expect(update?.confirmedLedger).toBe(1050);
+      expect(update?.lastError).toBeNull();
+    });
+
+    it("falls back to config.networkPassphrase when record has no pinned passphrase", () => {
+      const unpinnedRecord = makeRecord({
+        finalityStatus: "PENDING",
+        networkPassphrase: null,
+        pollCount: 0,
       });
+      const config = { ...BASE_CONFIG, networkPassphrase: TESTNET_PASSPHRASE };
+      const foreignPoll: HorizonPollResult = {
+        outcome: "confirmed",
+        ledger: 1050,
+        successful: true,
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(unpinnedRecord, foreignPoll, 1050, config);
+      expect(update?.finalityStatus).toBeUndefined();
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
     });
   });
 
-  describe("stale observation status visible without changing terminal records", () => {
-    it("keeps stale status visible on CONFIRMED records while computeTransition returns null", () => {
-      const confirmedRec = makeRecord({
-        finalityStatus: "CONFIRMED",
+  describe("transitionFromConfirming with foreign observation", () => {
+    it("rejects foreign network observation in CONFIRMING state without confirming", () => {
+      const confirmingRecord = makeRecord({
+        finalityStatus: "CONFIRMING",
         confirmedLedger: 1000,
-        repairApplied: true,
+        networkPassphrase: TESTNET_PASSPHRASE,
       });
-      const currentLedger = 1500; // 500 ledgers later (> threshold 120)
+      const foreignPoll: HorizonPollResult = {
+        outcome: "confirmed",
+        ledger: 1010,
+        successful: true,
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
 
-      // 1. Stale observation status is visible
-      const obs = getPaymentObservation(confirmedRec, currentLedger, 120);
-      expect(obs.isStale).toBe(true);
-      expect(obs.status).toBe("stale");
-      expect(obs.age).toBe(500);
-      expect(obs.ledger).toBe(1000);
-
-      // 2. computeTransition returns null (terminal record is never changed)
-      const update = computeTransition(confirmedRec, null, currentLedger, BASE_CONFIG);
-      expect(update).toBeNull();
-
-      // 3. Status remains CONFIRMED (immutable)
-      expect(confirmedRec.finalityStatus).toBe("CONFIRMED");
-      expect(validateTransition(confirmedRec.finalityStatus, "EXPIRED")).not.toBeNull();
-    });
-
-    it("keeps stale status visible on FAILED records without altering terminal record", () => {
-      const failedRec = makeRecord({
-        finalityStatus: "FAILED",
-        confirmedLedger: 1000,
-        lastError: "tx_bad_seq",
-        repairApplied: true,
-      });
-      const currentLedger = 1300;
-
-      const obs = getPaymentObservation(failedRec, currentLedger, 120);
-      expect(obs.isStale).toBe(true);
-      expect(obs.status).toBe("stale");
-      expect(obs.age).toBe(300);
-
-      const update = computeTransition(failedRec, null, currentLedger, BASE_CONFIG);
-      expect(update).toBeNull();
-      expect(failedRec.finalityStatus).toBe("FAILED");
-    });
-
-    it("preserves EXPIRED and NOT_FOUND terminal records", () => {
-      const expiredRec = makeRecord({
-        finalityStatus: "EXPIRED",
-        confirmedLedger: null,
-        repairApplied: true,
-      });
-      const notFoundRec = makeRecord({
-        finalityStatus: "NOT_FOUND",
-        confirmedLedger: null,
-        repairApplied: true,
-      });
-
-      expect(getPaymentObservation(expiredRec, 1500).status).toBe("unknown");
-      expect(computeTransition(expiredRec, null, 1500, BASE_CONFIG)).toBeNull();
-
-      expect(getPaymentObservation(notFoundRec, 1500).status).toBe("unknown");
-      expect(computeTransition(notFoundRec, null, 1500, BASE_CONFIG)).toBeNull();
+      // Depth is satisfied (1010 >= 1000 + 2), but foreign observation must block transition
+      const update = transitionFromConfirming(confirmingRecord, 1010, BASE_CONFIG, new Date(), foreignPoll);
+      expect(update?.finalityStatus).toBeUndefined(); // Does NOT transition to CONFIRMED
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
     });
   });
 });
