@@ -108,9 +108,14 @@ def test_decrypt_rejects_non_prefixed_input():
 def test_build_and_verify_roundtrip(tmp_path: Path, monkeypatch):
     """A backup created with a known passphrase verifies cleanly."""
     db_path = tmp_path / "talos-agent.db"
-    db = _seed_agent_db(db_path)
-    db.close()
-    _patch_app_dir(monkeypatch, tmp_path)
+    _seed_agent_db(db_path)
+    # Patch both APP_DIR (modern callers) and DB_PATH (legacy constant cache).
+    from talos_agent import backup_service as bs
+    # backup_service delegates to db.get_db_path which is bound at module
+    # load to db.APP_DIR (= config.APP_DIR). Patch both so collect_agent_files
+    # finds the seeded DB at the patched tmp_path.
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     out = tmp_path / "artifact.enc"
     pw = "test-passphrase-v1-long"
@@ -133,9 +138,10 @@ def test_build_and_verify_roundtrip(tmp_path: Path, monkeypatch):
 def test_verify_rejects_tampered_artifact(tmp_path: Path, monkeypatch):
     """Flipping a byte inside the ENC:: blob must yield AUTH_FAILED on verify."""
     db_path = tmp_path / "talos-agent.db"
-    db = _seed_agent_db(db_path)
-    db.close()
-    _patch_app_dir(monkeypatch, tmp_path)
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     out = tmp_path / "tampered.enc"
     pw = "good-passphrase-long"
@@ -157,9 +163,10 @@ def test_verify_rejects_tampered_artifact(tmp_path: Path, monkeypatch):
 
 def test_verify_rejects_wrong_password(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "talos-agent.db"
-    db = _seed_agent_db(db_path)
-    db.close()
-    _patch_app_dir(monkeypatch, tmp_path)
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     out = tmp_path / "wrong.enc"
     build_backup(password="correctpw-1", out_path=out)
@@ -246,9 +253,10 @@ def test_restore_is_idempotent_after_existing(tmp_path: Path, monkeypatch):
     """A second restore over an already-restored DB should produce identical
     bytes (so re-running a restore is safe if the first ran into a lock)."""
     db_path = tmp_path / "talos-agent.db"
-    db = _seed_agent_db(db_path)
-    db.close()  # Close to avoid Windows file lock
-    _patch_app_dir(monkeypatch, tmp_path)
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     out = tmp_path / "x.enc"
     pw = "idempotent-pass-long"
@@ -275,7 +283,8 @@ def test_concurrent_backup_busy(tmp_path: Path, monkeypatch):
     if os.name == "nt":
         pytest.skip("fcntl flock not supported on Windows")
     from talos_agent import backup_service as bs
-    _patch_app_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     db_path = tmp_path / "agent.db"
     db = _seed_agent_db(db_path)
