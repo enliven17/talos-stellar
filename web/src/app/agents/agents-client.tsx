@@ -4,8 +4,11 @@ import { useState, useMemo } from "react";
 import Link from "next/link";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentEmptyState, AgentErrorState } from "@/components/agent-view-states";
+import { deriveServiceAvailability } from "@/lib/marketplace-availability";
 
-interface TalosListItem {
+const MAX_COMPARISON_AGENTS = 3;
+
+export interface TalosListItem {
   id: string;
   name: string;
   agentName: string | null;
@@ -23,6 +26,7 @@ interface TalosListItem {
   serviceDescription: string | null;
   servicePrice: number | null;
   servicePriceDisplay: string | null;
+  servicePriceExact: string | null;
   serviceCurrency: string | null;
   framework: string | null;
   channels: string[];
@@ -86,6 +90,7 @@ export function AgentsClient({
   const [activeCategory, setActiveCategory] = useState<Category>("All");
   const [sortBy, setSortBy] = useState<SortOption>("revenue");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const filtered = useMemo(() => {
     let result = agents.filter((item) => {
@@ -128,6 +133,10 @@ export function AgentsClient({
   }, [agents, search, activeCategory, sortBy, statusFilter]);
 
   const onlineCount = agents.filter((c) => c.agentOnline).length;
+  const selectedAgents = selectedIds.flatMap((id) => {
+    const agent = agents.find((item) => item.id === id);
+    return agent ? [agent] : [];
+  });
   const hasActiveFilters =
     search !== "" || activeCategory !== "All" || statusFilter !== "All";
 
@@ -265,13 +274,19 @@ export function AgentsClient({
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filtered.map((item) => (
-            <Link
+          {filtered.map((item) => {
+            const isSelected = selectedIds.includes(item.id);
+            const atComparisonLimit = selectedIds.length >= MAX_COMPARISON_AGENTS;
+            return (
+            <article
               key={item.id}
-              href={`/agents/${item.id}`}
               data-testid={`agent-card-${item.id}`}
-              className="bg-surface border border-border p-6 hover:bg-surface-hover transition-colors flex flex-col justify-between group"
+              className="bg-surface border border-border hover:bg-surface-hover transition-colors flex flex-col"
             >
+              <Link
+                href={`/agents/${item.id}`}
+                className="p-6 flex flex-col justify-between flex-1 group"
+              >
               {/* Top: avatar + name + status */}
               <div>
                 <div className="flex items-start justify-between mb-1">
@@ -381,10 +396,190 @@ export function AgentsClient({
                   )}
                 </div>
               </div>
-            </Link>
-          ))}
+              </Link>
+              <div className="px-6 pb-5">
+                <button
+                  type="button"
+                  aria-pressed={isSelected}
+                  aria-label={`${isSelected ? "Remove" : "Add"} ${item.name} ${isSelected ? "from" : "to"} comparison`}
+                  disabled={!isSelected && atComparisonLimit}
+                  onClick={() => {
+                    setSelectedIds((current) => {
+                      if (current.includes(item.id)) {
+                        return current.filter((id) => id !== item.id);
+                      }
+                      return current.length < MAX_COMPARISON_AGENTS
+                        ? [...current, item.id]
+                        : current;
+                    });
+                  }}
+                  className="border border-accent text-accent px-3 py-2 text-sm hover:bg-accent hover:text-background disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {isSelected ? "Selected" : "Compare"}
+                </button>
+              </div>
+            </article>
+            );
+          })}
         </div>
       )}
+
+      <section
+        aria-labelledby="agent-comparison-heading"
+        className="mt-12 border-t border-border pt-8"
+        data-testid="agent-comparison"
+      >
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <h2 id="agent-comparison-heading" className="text-lg font-bold text-accent">
+              Compare selected agents
+            </h2>
+            <p className="text-sm text-muted mt-1">
+              Compare up to {MAX_COMPARISON_AGENTS} agents using their public listings.
+            </p>
+          </div>
+          {selectedAgents.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSelectedIds([])}
+              className="text-sm text-muted underline hover:text-foreground shrink-0"
+            >
+              Clear selection
+            </button>
+          )}
+        </div>
+
+        {selectedAgents.length === 0 ? (
+          <p role="status" className="border border-border bg-surface p-5 text-sm text-muted">
+            No agents selected. Use “Compare” on up to {MAX_COMPARISON_AGENTS} agent cards to
+            see their capabilities, availability, and exact service prices here.
+          </p>
+        ) : (
+          <div className="overflow-x-auto border border-border">
+            <table className="w-full min-w-[640px] border-collapse text-sm">
+              <thead>
+                <tr className="bg-surface">
+                  <th scope="col" className="w-40 p-3 text-left text-muted font-medium">
+                    Listing
+                  </th>
+                  {selectedAgents.map((agent) => (
+                    <th key={agent.id} scope="col" className="min-w-48 p-3 text-left align-top">
+                      <Link
+                        href={`/agents/${agent.id}`}
+                        className="text-accent font-bold underline"
+                      >
+                        {agent.name}
+                      </Link>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${agent.name} from comparison`}
+                        onClick={() =>
+                          setSelectedIds((current) =>
+                            current.filter((id) => id !== agent.id),
+                          )
+                        }
+                        className="block mt-2 text-xs text-muted underline hover:text-foreground font-normal"
+                      >
+                        Remove
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-t border-border">
+                  <th scope="row" className="p-3 text-left text-muted font-medium">Category</th>
+                  {selectedAgents.map((agent) => (
+                    <td key={agent.id} className="p-3">{agent.category || "Not listed"}</td>
+                  ))}
+                </tr>
+                <tr className="border-t border-border">
+                  <th scope="row" className="p-3 text-left text-muted font-medium">Description</th>
+                  {selectedAgents.map((agent) => (
+                    <td key={agent.id} className="p-3">{agent.description || "Not listed"}</td>
+                  ))}
+                </tr>
+                <tr className="border-t border-border">
+                  <th scope="row" className="p-3 text-left text-muted font-medium">Channels</th>
+                  {selectedAgents.map((agent) => (
+                    <td key={agent.id} className="p-3">
+                      {agent.channels.length > 0 ? agent.channels.join(", ") : "Not listed"}
+                    </td>
+                  ))}
+                </tr>
+                <tr className="border-t border-border">
+                  <th scope="row" className="p-3 text-left text-muted font-medium">Framework</th>
+                  {selectedAgents.map((agent) => (
+                    <td key={agent.id} className="p-3">
+                      {agent.framework ? agent.framework : "Not listed"}
+                    </td>
+                  ))}
+                </tr>
+                <tr className="border-t border-border">
+                  <th scope="row" className="p-3 text-left text-muted font-medium">Service</th>
+                  {selectedAgents.map((agent) => (
+                    <td key={agent.id} className="p-3">
+                      {agent.serviceName ? (
+                        <>
+                          <span className="font-medium">{agent.serviceName}</span>
+                          {agent.serviceDescription && (
+                            <span className="block mt-1 text-xs text-muted">
+                              {agent.serviceDescription}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        "Not listed"
+                      )}
+                    </td>
+                  ))}
+                </tr>
+                <tr className="border-t border-border">
+                  <th scope="row" className="p-3 text-left text-muted font-medium">Availability</th>
+                  {selectedAgents.map((agent) => {
+                    const availability = deriveServiceAvailability(
+                      agent.agentOnline,
+                      agent.agentLastSeen,
+                    );
+                    const label = availability.state === "unknown"
+                      ? "Unknown — no observation"
+                      : `${availability.state === "available" ? "Available" : "Unavailable"} (${availability.freshness} observation)`;
+                    return (
+                      <td key={agent.id} className="p-3">
+                        <span>{label}</span>
+                        {availability.lastObservedAt && (
+                          <time
+                            dateTime={availability.lastObservedAt}
+                            className="block mt-1 text-xs text-muted"
+                          >
+                            Observed {new Date(availability.lastObservedAt).toLocaleString()}
+                          </time>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+                <tr className="border-t border-border">
+                  <th scope="row" className="p-3 text-left text-muted font-medium">Price / request</th>
+                  {selectedAgents.map((agent) => (
+                    <td key={agent.id} className="p-3 font-mono">
+                      {agent.servicePriceExact !== null && agent.serviceCurrency ? (
+                        `${agent.servicePriceExact} ${agent.serviceCurrency}`
+                      ) : (
+                        "Not listed"
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              </tbody>
+            </table>
+            <p className="border-t border-border bg-surface px-3 py-2 text-xs text-muted">
+              Availability reflects the latest heartbeat and is not a guarantee of service.
+              Prices are shown in each listing’s stated currency per request.
+            </p>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
