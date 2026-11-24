@@ -11,6 +11,10 @@ import { AgentLifecycleChecklist } from "@/components/agent-lifecycle-checklist"
 import { AgentPurchasesSection } from "@/components/agent-purchases-section";
 import { CopyButton } from "@/components/copy-button";
 import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
+import {
+  FinancialActionAnnouncementRegion,
+  useFinancialActionAnnouncement,
+} from "@/components/financial-action-announcement";
 import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
@@ -109,6 +113,7 @@ const JOB_STATUS_STYLES: Record<string, string> = {
 };
 
 export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
+  const { announcement, announce } = useFinancialActionAnnouncement();
   const panelRef = useRef<HTMLDivElement>(null);
   const prevFocusedRef = useRef<HTMLElement | null>(null);
 
@@ -238,6 +243,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
   const submitBuyToken = useCallback(async () => {
     if (!address || buyQty <= 0) return;
+    const actionId = `${talos.id}:buy-token:${Date.now()}`;
     setBuyStatus("buying");
     try {
       const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon } =
@@ -293,6 +299,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       const signedTx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
       const result = await server.submitTransaction(signedTx);
       const txHash = result.hash;
+      announce({ actionId, label: "Token purchase", outcome: "submitted" });
 
       const res = await fetch(`/api/talos/${talos.id}/buy-token`, {
         method: "POST",
@@ -307,16 +314,19 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       if (res.ok && data.success) {
         setBuyResult({ txHash, message: data.message });
         setBuyStatus("success");
+        announce({ actionId, label: "Token purchase", outcome: "confirmed" });
       } else {
         alert(data.error || "Purchase failed");
         setBuyStatus("error");
+        announce({ actionId, label: "Token purchase", outcome: "failed" });
       }
     } catch (err: unknown) {
       console.error("[buy-token]", err);
       alert(err instanceof Error ? err.message : "Transaction failed");
       setBuyStatus("error");
+      announce({ actionId, label: "Token purchase", outcome: "failed" });
     }
-  }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, talos.stellarAssetCode, signTransaction]);
+  }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, talos.stellarAssetCode, signTransaction, announce]);
 
   const closeBuyModal = useCallback(() => {
     setBuyOpen(false);
@@ -400,6 +410,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
   const handleRequestServiceInner = useCallback(async () => {
     if (!address || !talos.service) return;
+    const actionId = `${talos.id}:service:${Date.now()}`;
     setServiceStatus("paying");
     setServiceError(null);
     try {
@@ -441,6 +452,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         payload = { request: servicePayload };
       }
 
+      announce({ actionId, label: "Service payment", outcome: "submitted" });
       const res = await fetch(`/api/talos/${talos.id}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -459,6 +471,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           status: data.status,
         });
         setServiceStatus("success");
+        announce({ actionId, label: "Service payment", outcome: "confirmed" });
       } else {
         const isRetryable = Boolean(data.retryable);
         const retryAfterMs = typeof data.retryAfterMs === "number" ? data.retryAfterMs : 0;
@@ -468,6 +481,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           retryAfterMs,
         });
         setServiceStatus("error");
+        announce({ actionId, label: "Service request", outcome: "failed" });
         // Start countdown if server tells us to wait before retrying
         if (isRetryable && retryAfterMs > 0) {
           const seconds = Math.ceil(retryAfterMs / 1000);
@@ -492,8 +506,9 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       console.error("[request-service]", err);
       setServiceError({ message: err instanceof Error ? err.message : "Transaction failed", retryable: false });
       setServiceStatus("error");
+      announce({ actionId, label: "Service request", outcome: "failed" });
     }
-  }, [address, talos.id, talos.service, talos.agentWalletAddress, servicePayload, signTransaction]);
+  }, [address, talos.id, talos.service, talos.agentWalletAddress, servicePayload, signTransaction, announce]);
 
   // ─── Governance (approvals) ───────────────────────────────────────────────
   const [approvals, setApprovals] = useState<Approval[]>([]);
@@ -633,7 +648,9 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
   const handleDistributeInner = useCallback(async () => {
     if (!address) return;
+    const actionId = `${talos.id}:distribution:${Date.now()}`;
     setDistLoading(true);
+    announce({ actionId, label: "Revenue distribution", outcome: "submitted" });
     try {
       const res = await fetch(`/api/talos/${talos.id}/revenue/distribute`, {
         method: "POST",
@@ -644,13 +661,18 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       if (res.ok) {
         alert(`Distributed! ${data.message}`);
         loadDistPreview();
+        announce({ actionId, label: "Revenue distribution", outcome: "confirmed" });
       } else {
         alert(data.error || "Distribution failed");
+        announce({ actionId, label: "Revenue distribution", outcome: "failed" });
       }
+    } catch (error) {
+      announce({ actionId, label: "Revenue distribution", outcome: "failed" });
+      throw error;
     } finally {
       setDistLoading(false);
     }
-  }, [address, talos.id, loadDistPreview]);
+  }, [address, talos.id, loadDistPreview, announce]);
 
   // ─── Buyback ──────────────────────────────────────────────────────────────
   const [buybackPreview, setBuybackPreview] = useState<BuybackPreview | null>(null);
@@ -757,7 +779,9 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
   const handleBuyback = useCallback(async () => {
     if (!address) return;
+    const actionId = `${talos.id}:buyback:${Date.now()}`;
     setBuybackLoading(true);
+    announce({ actionId, label: "Treasury buyback", outcome: "submitted" });
     try {
       const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`, {
         method: "POST",
@@ -772,13 +796,18 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       if (res.ok) {
         alert(data.message);
         loadBuybackPreview();
+        announce({ actionId, label: "Treasury buyback", outcome: "confirmed" });
       } else {
         alert(data.error || "Buyback failed");
+        announce({ actionId, label: "Treasury buyback", outcome: "failed" });
       }
+    } catch (error) {
+      announce({ actionId, label: "Treasury buyback", outcome: "failed" });
+      throw error;
     } finally {
       setBuybackLoading(false);
     }
-  }, [address, talos.id, buybackForm, loadBuybackPreview]);
+  }, [address, talos.id, buybackForm, loadBuybackPreview, announce]);
   }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, talos.stellarAssetCode, signTransaction]);
 
   // ─── Transaction review wrappers (issue #1470) ─────────────────
@@ -863,6 +892,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
+      <FinancialActionAnnouncementRegion announcement={announcement} />
       <Link
         href="/agents"
         className="text-xs text-muted hover:text-foreground transition-colors"
