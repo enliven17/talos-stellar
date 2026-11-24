@@ -189,10 +189,20 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `a2a_write_timeout` | `A2A_WRITE_TIMEOUT` | `10.0` | No | Seconds to wait to send A2A request body |
 | `a2a_pool_timeout` | `A2A_POOL_TIMEOUT` | `5.0` | No | Seconds to wait for A2A connection from pool |
 | `shutdown_deadline` | `SHUTDOWN_DEADLINE` | `30.0` | No | Seconds to wait for in-flight tasks to finish after shutdown is requested before they are forcibly cancelled. Set to 0 to cancel immediately. |
+| `task_failure_max_history` | `TALOS_TASK_FAILURE_MAX_HISTORY` | `100` | No | Maximum number of failure records retained per task. |
 | `dividend_distribution_interval` | `DIVIDEND_DISTRIBUTION_INTERVAL` | `3600` | No | Seconds between dividend distribution checks |
 | `dividend_usdc_threshold` | `DIVIDEND_USDC_THRESHOLD` | `100` | No | USDC threshold to trigger dividend distribution |
 | `replay_enabled` | `REPLAY_ENABLED` | `false` | No | Enable execution replay recording for incident analysis |
 | `replay_redact_payloads` | `REPLAY_REDACT_PAYLOADS` | `true` | No | Redact sensitive values in replay event payloads |
+| `demo_commerce_mode` | `DEMO_COMMERCE_MODE` | `false` | No | Emit aggressive demo-purchasing guidance in the system prompt |
+| `dry_run` | `DRY_RUN` | `false` | No | Block all external side effects and record suppressed calls |
+| `dry_run_allow_production_keys` | `DRY_RUN_ALLOW_PRODUCTION_KEYS` | `false` | No | Bypass the dry-run vs. production-key conflict guard |
+| `publish_timeout_seconds` | `PUBLISH_TIMEOUT_SECONDS` | `90.0` | No | Publishing tool timeout in seconds |
+| `content_history_max_limit` | `CONTENT_HISTORY_MAX_LIMIT` | `50` | No | Hard cap on the limit passed to get_content_history |
+| `research_notes_max_bytes` | `RESEARCH_NOTES_MAX_BYTES` | `4096` | No | Maximum byte length of a research note stored via save_research_notes |
+| `replay_max_events` | `REPLAY_MAX_EVENTS` | `500` | No | Maximum events to capture per cycle |
+| `replay_max_payload_bytes` | `REPLAY_MAX_PAYLOAD_BYTES` | `65536` | No | Maximum bytes per event payload |
+| `replay_keep_sessions` | `REPLAY_KEEP_SESSIONS` | `100` | No | Number of replay sessions to keep |
 
 ## Related Documentation
 
@@ -204,6 +214,7 @@ Additional architectural, configuration, and operational guides:
   - `talos-agent doctor` — read-only integrity and schema checks for every local agent database.
   - [Adapter HTTP Testing](./docs/adapter-http-testing.md) — Fake transport contract for isolated communication-adapter tests.
   - [Adapter Health Snapshots](./docs/adapter-health-snapshots.md) — Runtime health snapshot captures and telemetry.
+  - [Adapter Registration](./docs/adapter-registration.md) — Idempotent registration and conflicting-capability handling.
   - [Discord Reconnect Policy](./docs/discord-reconnect-policy.md) — Connection lifecycle and reconnect backoff behavior for Discord.
   - [Logging Policy](./docs/LOGGING_POLICY.md) — Structured logging standards, redaction rules, and severity levels.
   - [Policy Engine](./docs/policy-engine.md) — Declarative policy engine rules, evaluation, and enforcement.
@@ -534,6 +545,15 @@ See the
 for the input → class mapping, privacy guarantees, compatibility notes, and
 how to consume the classification.
 
+## Scheduler cancellation vs. failed attempts
+
+Scheduled tasks (`polling`, `heartbeat`, `job_heartbeat`, `activity_flush` and `job_effect_dispatch`) distinguish intentional shutdown from a failed attempt:
+
+- If `shutdown_event` is set while an attempt is running, an exception from that attempt is logged as interrupted by shutdown. It does not call `DurableBackoff.failure()`, so it never consumes retry budget or advances `attempt_count`.
+- `asyncio.CancelledError` is always re-raised and never recorded as a failure.
+- A genuine failure while the agent is running still consumes retry budget as before, including the `max_attempts` terminal stop.
+
+Agent cycle summaries record the terminal state in `outcome`: `completed`, `shutdown`, `cancelled`, `max_iterations`, `provider_failure` or `error`. A cancelled cycle is reported with `outcome=cancelled`, `error_type=CancelledError` and `error_category=cancelled`, and is no longer reported as `completed`.
 ## Scheduler execution identities
 
 Financial scheduler cycles reserve a durable execution identity in the local

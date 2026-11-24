@@ -11,6 +11,7 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from talos_agent.db.migrations import DB_PATH, run_migrations
 from talos_agent.db.repos import (
@@ -135,16 +136,23 @@ class LocalDB:
     def get_recent_content(self, limit: int = 20) -> list[dict]:
         return self._content.get_recent_content(limit)
 
-    def get_recent_content_by_channel(self, channel: str, limit: int = 20) -> list[dict]:
+    def get_recent_content_by_channel(
+        self, channel: str, limit: int = 20
+    ) -> list[dict]:
         return self._content.get_recent_content_by_channel(channel, limit)
 
     # ── Commerce Queue ────────────────────────────────────────────────────
 
-    def add_commerce_job(self, job_id: str, talos_id: str, service_type: str, payload: dict | None = None) -> None:
+    def add_commerce_job(
+        self, job_id: str, talos_id: str, service_type: str, payload: dict | None = None
+    ) -> None:
         self._commerce.add_commerce_job(job_id, talos_id, service_type, payload)
 
     def update_commerce_status(self, job_id: str, status: str) -> None:
         self._commerce.update_commerce_status(job_id, status)
+
+    def find_unknown_commerce_job(self, canonical_payload: str) -> dict | None:
+        return self._commerce.find_unknown_commerce_job(canonical_payload)
 
     def count_pending_commerce_jobs(self) -> int:
         return self._commerce.count_pending_commerce_jobs()
@@ -157,8 +165,38 @@ class LocalDB:
 
     # ── Approval Cache ────────────────────────────────────────────────────
 
-    def cache_approval(self, approval_id: str, type_: str, title: str, description: str | None, amount: float | None) -> None:
-        self._spending.cache_approval(approval_id, type_, title, description, amount)
+    def cache_approval(
+        self,
+        approval_id: str,
+        type_: str,
+        title: str,
+        description: str | None,
+        amount: float | None,
+        action_digest: str | None = None,
+        policy_digest: str | None = None,
+        canonical_action: str | None = None,
+        simulated_result_digest: str | None = None,
+    ) -> None:
+        self._spending.cache_approval(
+            approval_id,
+            type_,
+            title,
+            description,
+            amount,
+            action_digest,
+            policy_digest,
+            canonical_action,
+            simulated_result_digest,
+        )
+
+    def get_approval(self, approval_id: str) -> dict | None:
+        return self._spending.get_approval(approval_id)
+
+    def save_policy_approval(self, approval: Any) -> None:
+        self._spending.save_policy_approval(approval)
+
+    def get_policy_approval(self, approval_id: str) -> Any | None:
+        return self._spending.get_policy_approval(approval_id)
 
     def get_pending_approvals(self) -> list[dict]:
         return self._spending.get_pending_approvals()
@@ -182,7 +220,9 @@ class LocalDB:
 
     # ── Playbooks ─────────────────────────────────────────────────────────
 
-    def save_playbook(self, name: str, data: dict, source_talos: str | None = None) -> None:
+    def save_playbook(
+        self, name: str, data: dict, source_talos: str | None = None
+    ) -> None:
         self._config.save_playbook(name, data, source_talos)
 
     def find_playbook_by_name(self, name: str) -> dict | None:
@@ -196,7 +236,13 @@ class LocalDB:
 
     # ── Spending Tracker ──────────────────────────────────────────────────
 
-    def record_spending(self, amount: float, category: str, description: str = "", currency: str = "USDC") -> None:
+    def record_spending(
+        self,
+        amount: float,
+        category: str,
+        description: str = "",
+        currency: str = "USDC",
+    ) -> None:
         self._spending.record_spending(amount, category, description, currency)
 
     def get_spending_today(self) -> float:
@@ -226,7 +272,9 @@ class LocalDB:
         impressions: int = 0,
         followers_at: int = 0,
     ) -> None:
-        self._content.record_performance(content_id, channel, likes, reposts, replies, impressions, followers_at)
+        self._content.record_performance(
+            content_id, channel, likes, reposts, replies, impressions, followers_at
+        )
 
     def get_content_with_performance(self, limit: int = 20) -> list[dict]:
         return self._content.get_content_with_performance(limit)
@@ -253,7 +301,9 @@ class LocalDB:
         confidence: float = 0.5,
         expires_days: int | None = 30,
     ) -> int:
-        return self._learnings.save_learning(category, insight, evidence, confidence, expires_days)
+        return self._learnings.save_learning(
+            category, insight, evidence, confidence, expires_days
+        )
 
     def get_active_learnings(self, limit: int = 10) -> list[dict]:
         return self._learnings.get_active_learnings(limit)
@@ -273,7 +323,9 @@ class LocalDB:
         engagement_score: float = 0.0,
         keywords: list[str] | None = None,
     ) -> None:
-        self._learnings.upsert_audience_insight(segment, description, engagement_score, keywords)
+        self._learnings.upsert_audience_insight(
+            segment, description, engagement_score, keywords
+        )
 
     def get_audience_insights(self, limit: int = 5) -> list[dict]:
         return self._learnings.get_audience_insights(limit)
@@ -291,10 +343,18 @@ class LocalDB:
         note: str = "",
     ) -> int:
         return self._dividends.record_dividend(
-            recipient_address, token_symbol, amount, currency, spending_log_id, tx_hash, note
+            recipient_address,
+            token_symbol,
+            amount,
+            currency,
+            spending_log_id,
+            tx_hash,
+            note,
         )
 
-    def get_dividend_history(self, limit: int = 50, recipient_address: str | None = None) -> list[dict]:
+    def get_dividend_history(
+        self, limit: int = 50, recipient_address: str | None = None
+    ) -> list[dict]:
         return self._dividends.get_dividend_history(limit, recipient_address)
 
     # ── Loans ─────────────────────────────────────────────────────────────
@@ -310,8 +370,13 @@ class LocalDB:
         repayment_address: str | None = None,
     ) -> int:
         return self._loans.create_loan(
-            platform, amount, collateral_asset, loan_asset,
-            duration_days, purpose, repayment_address
+            platform,
+            amount,
+            collateral_asset,
+            loan_asset,
+            duration_days,
+            purpose,
+            repayment_address,
         )
 
     def get_active_loans(self) -> list[dict]:
@@ -320,7 +385,9 @@ class LocalDB:
     def get_loan_by_id(self, loan_id: int) -> dict | None:
         return self._loans.get_loan_by_id(loan_id)
 
-    def record_repayment(self, loan_id: int, amount: float, tx_hash: str | None = None) -> None:
+    def record_repayment(
+        self, loan_id: int, amount: float, tx_hash: str | None = None
+    ) -> None:
         self._loans.record_repayment(loan_id, amount, tx_hash)
 
     def get_loans_due_soon(self, days: int = 7) -> list[dict]:
@@ -335,7 +402,9 @@ class LocalDB:
         next_attempt_at: datetime,
         terminal: bool = False,
     ) -> None:
-        self._retry.upsert_retry_state(task_name, attempt_count, next_attempt_at, terminal)
+        self._retry.upsert_retry_state(
+            task_name, attempt_count, next_attempt_at, terminal
+        )
 
     def save_retry_state(
         self,
@@ -346,8 +415,10 @@ class LocalDB:
         terminal: bool = False,
     ) -> None:
         self._retry.save_retry_state(
-            task_name, attempt_count=attempt_count,
-            next_attempt_at=next_attempt_at, terminal=terminal
+            task_name,
+            attempt_count=attempt_count,
+            next_attempt_at=next_attempt_at,
+            terminal=terminal,
         )
 
     def get_retry_state(self, task_name: str) -> dict | None:
@@ -355,6 +426,51 @@ class LocalDB:
 
     def clear_retry_state(self, task_name: str) -> None:
         self._retry.clear_retry_state(task_name)
+
+    # ── Task Failure History ──────────────────────────────────────────────
+
+    def record_task_failure(
+        self,
+        *,
+        talos_id: str = "",
+        task_name: str,
+        attempt_number: int,
+        error_code: object,
+        next_eligible_at: datetime | str,
+        max_history: int = 100,
+    ) -> int:
+        return self._retry.record_task_failure(
+            talos_id=talos_id,
+            task_name=task_name,
+            attempt_number=attempt_number,
+            error_code=error_code,
+            next_eligible_at=next_eligible_at,
+            max_history=max_history,
+        )
+
+    def get_task_failure_history(
+        self,
+        talos_id: str | None = None,
+        task_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        return self._retry.get_task_failure_history(
+            talos_id=talos_id,
+            task_name=task_name,
+            limit=limit,
+        )
+
+    def prune_task_failure_history(
+        self,
+        talos_id: str | None = None,
+        task_name: str | None = None,
+        keep_last: int = 100,
+    ) -> int:
+        return self._retry.prune_task_failure_history(
+            talos_id=talos_id,
+            task_name=task_name,
+            keep_last=keep_last,
+        )
 
     # ── Claimed Jobs ──────────────────────────────────────────────────────
 
@@ -365,7 +481,9 @@ class LocalDB:
         ttl_seconds: int = 300,
         lease_expires_at: datetime | None = None,
     ) -> None:
-        self._jobs.upsert_claimed_job(job_id, fencing_token, ttl_seconds, lease_expires_at)
+        self._jobs.upsert_claimed_job(
+            job_id, fencing_token, ttl_seconds, lease_expires_at
+        )
 
     def get_claimed_job(self, job_id: str) -> dict | None:
         return self._jobs.get_claimed_job(job_id)
@@ -404,6 +522,7 @@ class LocalDB:
         run_quick_check: bool = True,
     ):
         from talos_agent.wal_health import collect_wal_health
+
         return collect_wal_health(
             path=self._path,
             conn=self._conn,
@@ -428,11 +547,16 @@ class LocalDB:
         outcome: str = "completed",
     ) -> int:
         return self._cycles.save_cycle_summary(
-            talos_id=talos_id, cycle_id=cycle_id,
-            started_at=started_at, ended_at=ended_at,
-            duration_ms=duration_ms, tool_calls=tool_calls,
-            tool_names=tool_names, error_type=error_type,
-            error_category=error_category, outcome=outcome,
+            talos_id=talos_id,
+            cycle_id=cycle_id,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_ms=duration_ms,
+            tool_calls=tool_calls,
+            tool_names=tool_names,
+            error_type=error_type,
+            error_category=error_category,
+            outcome=outcome,
         )
 
     def get_recent_cycle_summaries(
@@ -482,7 +606,9 @@ class LocalDB:
         agent_version: str,
         started_at: str,
     ) -> None:
-        self._replay.create_replay_session(session_id, talos_id, agent_version, started_at)
+        self._replay.create_replay_session(
+            session_id, talos_id, agent_version, started_at
+        )
 
     def finish_replay_session(self, session_id: str, status: str = "completed") -> None:
         self._replay.finish_replay_session(session_id, status)
@@ -495,7 +621,9 @@ class LocalDB:
         payload_json: str,
         redacted: bool = False,
     ) -> None:
-        self._replay.insert_replay_event(session_id, event_id, event_type, payload_json, redacted)
+        self._replay.insert_replay_event(
+            session_id, event_id, event_type, payload_json, redacted
+        )
 
     def get_replay_events(self, session_id: str) -> list[sqlite3.Row]:
         return self._replay.get_replay_events(session_id)

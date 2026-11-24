@@ -39,7 +39,14 @@ _TRUNCATION_SENTINEL = {"__truncated__": True, "reason": "payload_too_large"}
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
-EventKind = Literal["llm_request", "llm_response", "tool_call", "tool_result", "cycle_start", "cycle_end"]
+EventKind = Literal[
+    "llm_request",
+    "llm_response",
+    "tool_call",
+    "tool_result",
+    "cycle_start",
+    "cycle_end",
+]
 
 
 @dataclass
@@ -64,7 +71,9 @@ class ReplayEvent:
 
     def stable_json(self) -> str:
         """Return deterministic JSON with sorted keys, no trailing whitespace."""
-        return json.dumps(self.to_dict(), sort_keys=True, ensure_ascii=False, default=_json_default)
+        return json.dumps(
+            self.to_dict(), sort_keys=True, ensure_ascii=False, default=_json_default
+        )
 
 
 def _json_default(obj: Any) -> Any:
@@ -80,6 +89,7 @@ def _json_default(obj: Any) -> Any:
 
 # ── Capture configuration ─────────────────────────────────────────────────────
 
+
 @dataclass
 class CaptureConfig:
     max_events: int = DEFAULT_MAX_EVENTS
@@ -89,6 +99,7 @@ class CaptureConfig:
 
 
 # ── Event capture session ─────────────────────────────────────────────────────
+
 
 class EventCapture:
     """Collects events for one agent cycle.
@@ -140,7 +151,9 @@ class EventCapture:
 
         # Enforce per-event payload size limit
         try:
-            raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=_json_default)
+            raw = json.dumps(
+                payload, sort_keys=True, ensure_ascii=False, default=_json_default
+            )
             if len(raw.encode()) > self.config.max_payload_bytes:
                 payload = dict(_TRUNCATION_SENTINEL)
         except (TypeError, ValueError):
@@ -159,40 +172,59 @@ class EventCapture:
         return event
 
     def record_cycle_start(self, talos_name: str, agent_version: str) -> None:
-        self.record("cycle_start", {
-            "talos_name": talos_name,
-            "agent_version": agent_version,
-            "wall_time": time.time(),
-        })
+        self.record(
+            "cycle_start",
+            {
+                "talos_name": talos_name,
+                "agent_version": agent_version,
+                "wall_time": time.time(),
+            },
+        )
 
     def record_cycle_end(self, outcome: str, iterations: int) -> None:
-        self.record("cycle_end", {
-            "outcome": outcome,
-            "iterations": iterations,
-            "wall_time": time.time(),
-            "dropped_events": self._dropped,
-        })
+        self.record(
+            "cycle_end",
+            {
+                "outcome": outcome,
+                "iterations": iterations,
+                "wall_time": time.time(),
+                "dropped_events": self._dropped,
+            },
+        )
 
-    def record_llm_request(self, model: str, messages: list[dict], tools: list[dict] | None) -> None:
-        self.record("llm_request", {
-            "model": model,
-            "message_count": len(messages),
-            "tool_count": len(tools) if tools else 0,
-            # Store messages but not the full tool schemas (too large / not needed for replay)
-            "messages": messages,
-        })
+    def record_llm_request(
+        self, model: str, messages: list[dict], tools: list[dict] | None
+    ) -> None:
+        self.record(
+            "llm_request",
+            {
+                "model": model,
+                "message_count": len(messages),
+                "tool_count": len(tools) if tools else 0,
+                # Store messages but not the full tool schemas (too large / not needed for replay)
+                "messages": messages,
+            },
+        )
 
-    def record_llm_response(self, content: str | None, tool_calls: list[dict] | None) -> None:
-        self.record("llm_response", {
-            "content": content,
-            "tool_calls": tool_calls or [],
-        })
+    def record_llm_response(
+        self, content: str | None, tool_calls: list[dict] | None
+    ) -> None:
+        self.record(
+            "llm_response",
+            {
+                "content": content,
+                "tool_calls": tool_calls or [],
+            },
+        )
 
     def record_tool_call(self, tool_name: str, args: dict) -> None:
-        self.record("tool_call", {
-            "tool_name": tool_name,
-            "args": args,
-        })
+        self.record(
+            "tool_call",
+            {
+                "tool_name": tool_name,
+                "args": args,
+            },
+        )
 
     def record_tool_result(self, tool_name: str, result: Any) -> None:
         payload: dict[str, Any] = {

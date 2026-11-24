@@ -51,7 +51,7 @@ async function main(): Promise<void> {
         { event: "jobs_worker_shutdown_grace_exceeded", inFlight: inFlight.length },
         "shutdown grace period exceeded — releasing in-flight leases and exiting",
       );
-      Promise.all(inFlight.map((job) => release(job.id, job.leaseId!).catch(() => null)))
+      Promise.all(inFlight.map((job) => release(job.id, job.leaseId!, job.leaseGeneration).catch(() => null)))
         .finally(() => process.exit(0))
         .catch(() => process.exit(0));
     }, jobsConfig.shutdownGraceMs);

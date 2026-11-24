@@ -115,6 +115,8 @@ class DurableBackoff:
         max_attempts: int = MAX_ATTEMPTS_DEFAULT,
         clock: ClockProtocol | None = None,
         jitter_identity: str | None = None,
+        talos_id: str | None = None,
+        max_failure_history: int = 100,
     ):
         _validate_jitter(jitter)
         if jitter_identity is not None and not isinstance(jitter_identity, str):
@@ -126,6 +128,8 @@ class DurableBackoff:
         self.max_backoff = max_backoff
         self.jitter = jitter
         self._jitter_identity = jitter_identity or task_name
+        self.talos_id = talos_id or (jitter_identity if jitter_identity != task_name else "")
+        self.max_failure_history = max_failure_history
         self.max_attempts = max_attempts
         self._clock: ClockProtocol = clock if clock is not None else SystemClock()
 
@@ -169,7 +173,11 @@ class DurableBackoff:
                 terminal=self._terminal,
             )
         except Exception as exc:
-            logger.warning("DurableBackoff: failed to persist state for %s: %s", self.task_name, exc)
+            logger.warning(
+                "DurableBackoff: failed to persist state for %s: %s",
+                self.task_name,
+                exc,
+            )
 
     # ── Public API ─────────────────────────────────────────
 
@@ -233,10 +241,17 @@ class DurableBackoff:
         try:
             self._db.clear_retry_state(self.task_name)
         except Exception as exc:
-            logger.warning("DurableBackoff: failed to clear state for %s: %s", self.task_name, exc)
+            logger.warning(
+                "DurableBackoff: failed to clear state for %s: %s", self.task_name, exc
+            )
 
-    def failure(self) -> None:
-        """Record a failed attempt, advance counters, and persist state."""
+    def failure(
+        self,
+        error: object = None,
+        *,
+        error_code: str | None = None,
+    ) -> None:
+        """Record a failed attempt, advance counters, persist retry state, and record failure history."""
         self.fail_count += 1
 
         if self.max_attempts > 0 and self.fail_count >= self.max_attempts:
@@ -248,5 +263,25 @@ class DurableBackoff:
             )
 
         delay = self.next_delay()
-        self._next_attempt_at = self._clock.now() + timedelta(seconds=delay)
+        next_eligible = self._clock.now() + timedelta(seconds=delay)
+        self._next_attempt_at = next_eligible
         self._persist()
+
+        # Persist bounded failure history if DB supports it
+        if hasattr(self._db, "record_task_failure"):
+            code_input = error_code if error_code is not None else error
+            try:
+                self._db.record_task_failure(
+                    talos_id=self.talos_id,
+                    task_name=self.task_name,
+                    attempt_number=self.fail_count,
+                    error_code=code_input,
+                    next_eligible_at=next_eligible,
+                    max_history=self.max_failure_history,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "DurableBackoff: failed to record failure history for %s: %s",
+                    self.task_name,
+                    exc,
+                )

@@ -1,4 +1,5 @@
 """Structured logging + Sentry initialisation for the prime-agent."""
+
 from __future__ import annotations
 
 import logging
@@ -55,6 +56,7 @@ def init_sentry() -> None:
         return
     import sentry_sdk
     from sentry_sdk.integrations.asyncio import AsyncioIntegration
+
     sentry_sdk.init(
         dsn=dsn,
         traces_sample_rate=0.1,

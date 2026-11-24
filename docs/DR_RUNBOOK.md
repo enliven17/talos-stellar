@@ -175,8 +175,12 @@ curl -sS -X POST "$TALOS_WEB_URL/api/ops/restore" \
 # Agent restore (dry run by default)
 uv run talos-agent restore /tmp/restore.enc
 
-# Apply agent restore (DBs are copied to .pre-restore siblings first)
-uv run talos-agent restore /tmp/restore.enc --confirm
+# Apply agent restore. Each database is first staged in an isolated candidate
+# directory and checked for SQLite integrity, required schema, schema version,
+# and agent identity. Only then is it swapped in; existing DBs are copied to
+# .pre-restore siblings first. Pass --agent-id in multi-agent mode to require
+# that the artifact belongs to that agent.
+uv run talos-agent restore /tmp/restore.enc --confirm --agent-id <agent-id>
 ```
 
 ### 2. Apply to a fresh database (web only)
@@ -211,8 +215,11 @@ Apply of a **bad** restore:
 - The restore runs inside a single Postgres transaction. If any row fails to
   insert OR the connection drops, the transaction is rolled back. The
   application database is never half-restored.
-- For the prime agent SQLite, `restore --confirm` writes sibling
-  `*.pre-restore` backups of every DB right before swap. To recover:
+- For the prime agent SQLite, `restore --confirm` stages and validates every
+  database in an isolated candidate directory before touching live state.
+  Corrupt databases, unexpected schemas, newer schema versions, and agent
+  identity mismatches abort the restore. Successful swaps write sibling
+  `*.pre-restore` backups of every DB right before replacement. To recover:
 
   ```bash
   mv ~/.talos-agent/talos-agent.db.pre-restore ~/.talos-agent/talos-agent.db
@@ -288,5 +295,5 @@ Set up an alert on `metrics.failures > 0` over a 24h window.
 | Concurrency / retry / timeout / partial failure | `test_backup_service.py` + Vitest unit tests |
 | Sensitive data handling | `sanitizeErrorMessage` regression tests; audit log review |
 | Backward-compatible migration | `0013_add_backup_runs.sql` is additive only |
-| Existing lint / tests / builds green | `pnpm lint && pnpm test && cargo test` |
+| Existing lint / tests / builds green | `pnpm lint && pnpm --dir web test && cargo test` |
 | Documentation covers setup, ops, rollback | This file + `MIGRATIONS.md`, `OBSERVABILITY.md`, `CONTRIBUTING.md`, `README.md` |

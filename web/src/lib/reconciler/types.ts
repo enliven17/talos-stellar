@@ -75,6 +75,33 @@ export interface TxRecord {
   updatedAt: Date;
 }
 
+// ─── Evidence Trail ─────────────────────────────────────────────────────────
+
+/** Observation sources recognized during payment finality reconciliation. */
+export type ObservationSource =
+  | "horizon"
+  | "wall_clock"
+  | "ledger_gap"
+  | "reconciler";
+
+/**
+ * Immutable evidence record capturing a payment finality decision:
+ *   - The closed ledger sequence number observed or evaluated
+ *   - The observation source (e.g., horizon, wall_clock, ledger_gap, reconciler)
+ *   - The transition reason explaining the state machine decision
+ */
+export interface FinalityEvidence {
+  txHash?: string;
+  txHashTruncated?: string;
+  ledger: number | null;
+  observationSource: string;
+  transitionReason: string;
+  fromStatus: FinalityStatus;
+  toStatus: FinalityStatus;
+  decidedAt: Date;
+  metadata?: Record<string, unknown>;
+}
+
 // ─── Horizon Poll Result ──────────────────────────────────────────────────────
 
 /** Discriminated union returned by the Horizon polling layer. */
@@ -83,6 +110,26 @@ export type HorizonPollResult =
   | { outcome: "failed";    ledger: number; successful: false; detail?: string; networkPassphrase?: string }
   | { outcome: "not_found"; networkPassphrase?: string }
   | { outcome: "error";     message: string; retryable: boolean; networkPassphrase?: string };
+
+// ─── Observation Status ───────────────────────────────────────────────────────
+
+/** Status classification for payment observation freshness. */
+export type ObservationStatus = "fresh" | "stale" | "unknown";
+
+/** Structured descriptor of the last trusted payment observation. */
+export interface PaymentObservation {
+  /** Ledger sequence of the trusted observation, or null if unknown. */
+  ledger: number | null;
+  /**
+   * Age in closed ledgers (currentLedger - observationLedger).
+   * 0 for current ledger, null for unknown age.
+   */
+  age: number | null;
+  /** Freshness status: "fresh" (within threshold), "stale" (exceeded), or "unknown". */
+  status: ObservationStatus;
+  /** True when status is "stale". */
+  isStale: boolean;
+}
 
 // ─── State Transition ─────────────────────────────────────────────────────────
 
@@ -94,8 +141,12 @@ export interface TxRecordUpdate {
   confirmedLedger?: number;
   pollCount?: number;
   lastError?: string | null;
+  reasonCode?: HorizonProviderFailureReasonCode;
   repairApplied?: boolean;
   updatedAt?: Date;
+  evidence?: FinalityEvidence;
+  observationSource?: string;
+  transitionReason?: string;
 }
 
 // ─── Repair Result ────────────────────────────────────────────────────────────
@@ -104,6 +155,31 @@ export interface TxRecordUpdate {
 export type RepairOutcome =
   | { ok: true;  repaired: boolean; detail?: string }
   | { ok: false; error: string; stale?: boolean };
+
+// ─── Transaction Association Conflict Detection ───────────────────────────────
+
+/** Minimal association binding a Stellar payment identity (txHash) to a job/source. */
+export interface TxAssociation {
+  txHash: string;
+  sourceType: TxSourceType;
+  sourceId: string | null;
+}
+
+/** Structured record of a conflicting payment-to-job association. */
+export interface TxAssociationConflict {
+  txHash: string;
+  existingSourceType: TxSourceType;
+  existingSourceId: string | null;
+  incomingSourceType: TxSourceType;
+  incomingSourceId: string | null;
+  reason: string;
+  detectedAt: Date;
+}
+
+/** Result of checking whether a job may be credited for a transaction record. */
+export type JobCreditDecision =
+  | { allowed: true }
+  | { allowed: false; reason: string; conflict?: TxAssociationConflict };
 
 // ─── Reconciler Config ────────────────────────────────────────────────────────
 

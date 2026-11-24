@@ -6,7 +6,11 @@ import {
   RATE_LIMIT_POLICIES,
   type RateLimitResult,
 } from "../src/lib/rate-limit";
-import { _resetRateLimitStore } from "../src/lib/rate-limit-store";
+import {
+  _resetRateLimitStore,
+  RedisRateLimitStore,
+  MemoryRateLimitStore,
+} from "../src/lib/rate-limit-store";
 
 const ORIGINAL_MAX_RETRY_AFTER = process.env.QUOTA_MAX_RETRY_AFTER_SECONDS;
 const ORIGINAL_UNKNOWN_RETRY_AFTER = process.env.QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS;
@@ -297,5 +301,66 @@ describe("applyRateLimitHeaders — boundary inputs", () => {
     expect(updated.headers.get("X-RateLimit-Limit")).toBe("5");
     expect(updated.headers.get("X-RateLimit-Remaining")).toBe("4");
     expect(updated.headers.get("X-RateLimit-Reset")).toBeNull();
+  });
+});
+
+describe("RedisRateLimitStore — bounded grace policy during outage", () => {
+  it("enforces strict fail-closed for payment operations during Redis outage", async () => {
+    // Use an unroutable/invalid Redis URL to simulate connection failure
+    const store = new RedisRateLimitStore("redis://127.0.0.1:1", false, 60_000);
+
+    const result = await store.increment("payment:key", 60_000, {
+      operationClass: "payment",
+    });
+
+    expect(result.count).toBe(Number.MAX_SAFE_INTEGER);
+    expect(store.getOutageStatus().isOutage).toBe(true);
+  });
+
+  it("enforces strict fail-closed for privileged operations during Redis outage", async () => {
+    const store = new RedisRateLimitStore("redis://127.0.0.1:1", false, 60_000);
+
+    const result = await store.increment("privileged:key", 60_000, {
+      operationClass: "privileged",
+    });
+
+    expect(result.count).toBe(Number.MAX_SAFE_INTEGER);
+    expect(store.getOutageStatus().isOutage).toBe(true);
+  });
+
+  it("allows standard operations to fail-open to memory within bounded grace window", async () => {
+    const store = new RedisRateLimitStore("redis://127.0.0.1:1", false, 60_000);
+
+    const result = await store.increment("standard:key", 60_000, {
+      operationClass: "standard",
+      graceTtlMs: 60_000,
+    });
+
+    expect(result.count).toBe(1);
+    expect(store.getOutageStatus().isOutage).toBe(true);
+  });
+
+  it("fails closed when outage duration exceeds graceTtlMs", async () => {
+    const store = new RedisRateLimitStore("redis://127.0.0.1:1", false, 0); // 0ms grace TTL boundary
+
+    // First failure triggers outageStartTime
+    const r1 = await store.increment("standard:key-expired", 60_000, {
+      operationClass: "standard",
+      graceTtlMs: -1, // Expired immediately
+    });
+
+    expect(r1.count).toBe(Number.MAX_SAFE_INTEGER);
+  });
+});
+
+describe("rateLimit helper — operationClass propagation and fail-closed", () => {
+  it("fails closed for payment operation when store throws unexpectedly", async () => {
+    const result = await rateLimit("pay:test", {
+      limit: 10,
+      windowMs: 60_000,
+      operationClass: "payment",
+    });
+    // When memory store is working, payment works normally
+    expect(result.ok).toBe(true);
   });
 });

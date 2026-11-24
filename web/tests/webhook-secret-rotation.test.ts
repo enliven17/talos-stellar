@@ -153,162 +153,208 @@ describe("Webhook secret rotation (zero-downtime)", () => {
     });
   });
 
-  describe("key identifier reuse rejection", () => {
-    it("derives deterministic key identifiers and compares in constant time", async () => {
-      const { deriveWebhookKeyId, isSameWebhookKey } = await import(
+  describe("key identifiers and bounded overlap interval", () => {
+    it("derives deterministic, non-reversible whkid_ identifiers", async () => {
+      const { deriveSigningKeyId, WEBHOOK_KEY_ID_PREFIX } = await import(
         "@/lib/webhooks/signing"
       );
-      const secretA = "whsec_active_secret_key_11111111";
-      const secretB = "whsec_rotated_secret_key_2222222";
+      const secretA = "whsec_rotation_key_alpha_123456";
+      const secretB = "whsec_rotation_key_beta_6543210";
 
-      expect(deriveWebhookKeyId(secretA)).toBe(deriveWebhookKeyId(secretA));
-      expect(deriveWebhookKeyId(secretA)).not.toBe(deriveWebhookKeyId(secretB));
-      expect(isSameWebhookKey(secretA, secretA)).toBe(true);
-      expect(isSameWebhookKey(secretA, secretB)).toBe(false);
+      const idA1 = deriveSigningKeyId(secretA);
+      const idA2 = deriveSigningKeyId(secretA);
+      const idB = deriveSigningKeyId(secretB);
+
+      expect(idA1).toBe(idA2);
+      expect(idA1).not.toBe(idB);
+      expect(idA1.startsWith(WEBHOOK_KEY_ID_PREFIX)).toBe(true);
+      expect(idA1).toMatch(/^whkid_[a-f0-9]{16}$/);
+      expect(idA1).not.toContain("alpha");
     });
 
-    it("rejects rotation with 409 conflict when reusing the active key identifier and preserves current key", async () => {
-      const { encryptSecret } = await import("@/lib/webhooks/signing");
-      const activeSecret = "whsec_active_secret_key_11111111";
-      const activeCiphertext = encryptSecret(activeSecret);
+    it("enforces bounded overlap interval limits", async () => {
+      const { validateOverlapSeconds } = await import("@/lib/webhooks/rotation");
+      const {
+        DEFAULT_SECRET_ROTATION_GRACE_SECONDS,
+        MIN_SECRET_ROTATION_GRACE_SECONDS,
+        MAX_SECRET_ROTATION_GRACE_SECONDS,
+      } = await import("@/lib/webhooks/config");
 
-      const updateSpy = vi.fn();
-      vi.doMock("@/db", () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                limit: () => Promise.resolve([{ id: "sub_1", secretCiphertext: activeCiphertext }]),
-              }),
-            }),
-          }),
-          update: updateSpy,
-        },
-      }));
-
-      const { rotateWebhookSecret, WEBHOOK_SECRET_KEY_REUSE_ERROR_CODE } = await import(
-        "@/lib/webhooks/rotation"
-      );
-
-      const result = await rotateWebhookSecret({
-        subscriptionId: "sub_1",
-        talosId: "talos_1",
-        newSecret: activeSecret,
+      expect(validateOverlapSeconds(undefined)).toEqual({
+        ok: true,
+        seconds: DEFAULT_SECRET_ROTATION_GRACE_SECONDS,
+      });
+      expect(validateOverlapSeconds(MIN_SECRET_ROTATION_GRACE_SECONDS)).toEqual({
+        ok: true,
+        seconds: MIN_SECRET_ROTATION_GRACE_SECONDS,
+      });
+      expect(validateOverlapSeconds(MAX_SECRET_ROTATION_GRACE_SECONDS)).toEqual({
+        ok: true,
+        seconds: MAX_SECRET_ROTATION_GRACE_SECONDS,
       });
 
-      expect(result).toEqual({
-        error: "New webhook secret must not reuse the active key identifier",
-        code: WEBHOOK_SECRET_KEY_REUSE_ERROR_CODE,
-        status: 409,
-      });
-      // Current signing key and pending deliveries remain untouched (no DB update)
-      expect(updateSpy).not.toHaveBeenCalled();
-
-      vi.doUnmock("@/db");
-    });
-
-    it("rotates successfully when new secret has a distinct key identifier", async () => {
-      const { encryptSecret, decryptSecret } = await import("@/lib/webhooks/signing");
-      const activeSecret = "whsec_active_secret_key_11111111";
-      const nextSecret = "whsec_rotated_secret_key_2222222";
-      const activeCiphertext = encryptSecret(activeSecret);
-
-      let capturedSet: Record<string, unknown> | null = null;
-      vi.doMock("@/db", () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                limit: () => Promise.resolve([{ id: "sub_1", secretCiphertext: activeCiphertext }]),
-              }),
-            }),
-          }),
-          update: () => ({
-            set: (vals: Record<string, unknown>) => {
-              capturedSet = vals;
-              return {
-                where: () => ({
-                  returning: () =>
-                    Promise.resolve([
-                      {
-                        id: "sub_1",
-                        secretRotatedAt: vals.secretRotatedAt,
-                        previousSecretExpiresAt: vals.previousSecretExpiresAt,
-                      },
-                    ]),
-                }),
-              };
-            },
-          }),
-        },
-      }));
-
-      const { rotateWebhookSecret } = await import("@/lib/webhooks/rotation");
-
-      const result = await rotateWebhookSecret({
-        subscriptionId: "sub_1",
-        talosId: "talos_1",
-        newSecret: nextSecret,
-        graceSeconds: 600,
-      });
-
-      expect("error" in result).toBe(false);
-      if (!("error" in result)) {
-        expect(result.id).toBe("sub_1");
-        expect(result.rotationActive).toBe(true);
-        expect(result.graceSeconds).toBe(600);
+      for (const invalid of [
+        0,
+        -60,
+        MIN_SECRET_ROTATION_GRACE_SECONDS - 1,
+        MAX_SECRET_ROTATION_GRACE_SECONDS + 1,
+        300.5,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        const res = validateOverlapSeconds(invalid);
+        expect(res.ok).toBe(false);
       }
-      expect(capturedSet).not.toBeNull();
-      expect(capturedSet!.previousSecretCiphertext).toBe(activeCiphertext);
-      expect(decryptSecret(capturedSet!.secretCiphertext as string)).toBe(nextSecret);
-
-      vi.doUnmock("@/db");
     });
 
-    it("allows recovery rotation when stored active ciphertext cannot be decrypted", async () => {
-      const nextSecret = "whsec_recovery_secret_key_333333";
+    it("verifies in-flight and overlapping deliveries across a controlled rotation", async () => {
+      const {
+        deriveSigningKeyId,
+        encryptSecret,
+        signPayloadWithKeyIds,
+        verifySignatureWithDetails,
+      } = await import("@/lib/webhooks/signing");
+      const { resolveSigningSecrets } = await import("@/lib/webhooks/rotation");
 
-      const updateSpy = vi.fn(() => ({
-        set: (vals: Record<string, unknown>) => ({
-          where: () => ({
-            returning: () =>
-              Promise.resolve([
-                {
-                  id: "sub_corrupt",
-                  secretRotatedAt: vals.secretRotatedAt,
-                  previousSecretExpiresAt: vals.previousSecretExpiresAt,
-                },
-              ]),
-          }),
-        }),
-      }));
+      const oldSecret = "whsec_inflight_old_key_11111111";
+      const newSecret = "whsec_inflight_new_key_22222222";
+      const oldKid = deriveSigningKeyId(oldSecret);
+      const newKid = deriveSigningKeyId(newSecret);
+      const payload = JSON.stringify({ event: "approval.approved", id: "evt_rot_1" });
 
-      vi.doMock("@/db", () => ({
-        db: {
-          select: () => ({
-            from: () => ({
-              where: () => ({
-                limit: () =>
-                  Promise.resolve([{ id: "sub_corrupt", secretCiphertext: "deadbeef_corrupted" }]),
-              }),
-            }),
-          }),
-          update: updateSpy,
-        },
-      }));
+      const t0 = new Date("2026-11-19T12:00:00.000Z");
+      const overlapExpires = new Date(t0.getTime() + 600_000); // 10 min overlap
+      const nowSec = Math.floor(t0.getTime() / 1000);
 
-      const { rotateWebhookSecret } = await import("@/lib/webhooks/rotation");
+      // 1. In-flight delivery signed before rotation (old key only)
+      const preRotationSigned = signPayloadWithKeyIds(
+        payload,
+        [{ id: oldKid, secret: oldSecret }],
+        1,
+        nowSec,
+      );
+      expect(preRotationSigned.keyIds).toEqual([oldKid]);
+      expect(preRotationSigned.keyIdHeader).toBe(oldKid);
 
-      const result = await rotateWebhookSecret({
-        subscriptionId: "sub_corrupt",
-        talosId: "talos_1",
-        newSecret: nextSecret,
+      // Consumer holding both keys during rollout verifies the in-flight delivery
+      const inflightCheck = verifySignatureWithDetails(
+        payload,
+        preRotationSigned.signature,
+        { [oldKid]: oldSecret, [newKid]: newSecret },
+        { keyIdHeader: preRotationSigned.keyIdHeader, nowSec },
+      );
+      expect(inflightCheck).toMatchObject({
+        valid: true,
+        matchedKeyId: oldKid,
+        version: 1,
       });
 
-      expect("error" in result).toBe(false);
-      expect(updateSpy).toHaveBeenCalledTimes(1);
+      // 2. Delivery during active overlap window (dual-signed with new + old)
+      const duringOverlapBundle = resolveSigningSecrets(
+        {
+          secretCiphertext: encryptSecret(newSecret),
+          previousSecretCiphertext: encryptSecret(oldSecret),
+          previousSecretExpiresAt: overlapExpires,
+          signatureVersion: 1,
+        },
+        new Date(t0.getTime() + 300_000),
+      );
+      expect(duringOverlapBundle.rotationActive).toBe(true);
+      expect(duringOverlapBundle.activeKeyId).toBe(newKid);
+      expect(duringOverlapBundle.previousKeyId).toBe(oldKid);
+      expect(duringOverlapBundle.keys.map((k) => k.id)).toEqual([newKid, oldKid]);
 
-      vi.doUnmock("@/db");
+      const overlapSigned = signPayloadWithKeyIds(
+        payload,
+        duringOverlapBundle.keys,
+        duringOverlapBundle.signatureVersion,
+        nowSec,
+      );
+      expect(overlapSigned.keyIdHeader).toBe(`${newKid},${oldKid}`);
+
+      // Consumer still on old key only succeeds
+      const oldOnlyCheck = verifySignatureWithDetails(
+        payload,
+        overlapSigned.signature,
+        { [oldKid]: oldSecret },
+        { keyIdHeader: overlapSigned.keyIdHeader, nowSec },
+      );
+      expect(oldOnlyCheck).toMatchObject({ valid: true, matchedKeyId: oldKid });
+
+      // Consumer already on new key only succeeds
+      const newOnlyCheck = verifySignatureWithDetails(
+        payload,
+        overlapSigned.signature,
+        { [newKid]: newSecret },
+        { keyIdHeader: overlapSigned.keyIdHeader, nowSec },
+      );
+      expect(newOnlyCheck).toMatchObject({ valid: true, matchedKeyId: newKid });
+
+      // 3. Exact expiry boundary (now === overlapExpires): previous key is omitted
+      const atExpiryBundle = resolveSigningSecrets(
+        {
+          secretCiphertext: encryptSecret(newSecret),
+          previousSecretCiphertext: encryptSecret(oldSecret),
+          previousSecretExpiresAt: overlapExpires,
+          signatureVersion: 1,
+        },
+        overlapExpires,
+      );
+      expect(atExpiryBundle.rotationActive).toBe(false);
+      expect(atExpiryBundle.activeKeyId).toBe(newKid);
+      expect(atExpiryBundle.previousKeyId).toBeNull();
+      expect(atExpiryBundle.keys.map((k) => k.id)).toEqual([newKid]);
+
+      const postOverlapSigned = signPayloadWithKeyIds(
+        payload,
+        atExpiryBundle.keys,
+        atExpiryBundle.signatureVersion,
+        nowSec,
+      );
+      expect(postOverlapSigned.keyIdHeader).toBe(newKid);
+
+      // Consumer still on old key only now fails with key_id_mismatch
+      const expiredOldCheck = verifySignatureWithDetails(
+        payload,
+        postOverlapSigned.signature,
+        { [oldKid]: oldSecret },
+        { keyIdHeader: postOverlapSigned.keyIdHeader, nowSec },
+      );
+      expect(expiredOldCheck).toMatchObject({
+        valid: false,
+        reason: "key_id_mismatch",
+      });
+    });
+
+    it("rejects tampered payloads and unknown key IDs", async () => {
+      const {
+        deriveSigningKeyId,
+        signPayloadWithKeyIds,
+        verifySignatureWithDetails,
+      } = await import("@/lib/webhooks/signing");
+
+      const secret = "whsec_tamper_check_secret_12345";
+      const kid = deriveSigningKeyId(secret);
+      const payload = JSON.stringify({ event: "revenue.recorded", amount: 100 });
+      const nowSec = 1_763_550_000;
+
+      const signed = signPayloadWithKeyIds(payload, [{ id: kid, secret }], 1, nowSec);
+
+      const tampered = verifySignatureWithDetails(
+        JSON.stringify({ event: "revenue.recorded", amount: 999 }),
+        signed.signature,
+        { [kid]: secret },
+        { keyIdHeader: signed.keyIdHeader, nowSec },
+      );
+      expect(tampered).toMatchObject({ valid: false, reason: "invalid_signature" });
+
+      const unknownKid = verifySignatureWithDetails(
+        payload,
+        signed.signature,
+        { [kid]: secret },
+        { keyIdHeader: "whkid_0000000000000000", nowSec },
+      );
+      expect(unknownKid).toMatchObject({ valid: false, reason: "key_id_mismatch" });
     });
   });
 });

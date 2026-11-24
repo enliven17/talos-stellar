@@ -11,51 +11,16 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from talos_agent.policy.actions import (
+    BYPASS_ACTIONS as _BYPASS_ACTIONS,
+    GATED_ACTIONS as _GATED_ACTIONS,
+    KNOWN_ACTIONS,
+)
 from talos_agent.policy.engine import PolicyEngine
 from talos_agent.policy.loader import PolicyLoader
 from talos_agent.policy.schema import ActionSpec, PolicyDecision, PolicyResult
 
 logger = logging.getLogger(__name__)
-
-# ── Action categories that the middleware intercepts ──────────────────────────
-
-# These are tool names whose execution should be gated by the policy engine.
-_GATED_ACTIONS: frozenset[str] = frozenset(
-    {
-        "purchase_service",
-        "transfer_xlm",
-        "airdrop_pulse",
-        "execute_approved_transfer",
-        "request_defi_loan",
-        "repay_loan",
-        "register_service",
-        "publish_content",
-        "fulfill_job",
-        "generate_playbook",
-        "create_pulse_token",
-    }
-)
-
-# Actions that always bypass policy evaluation (read-only, no side effects)
-_BYPASS_ACTIONS: frozenset[str] = frozenset(
-    {
-        "normalize_providers",
-        "plan_purchase",
-        "discover_services",
-        "get_xlm_balance",
-        "get_pulse_balance",
-        "get_active_loans",
-        "get_pending_jobs",
-        "get_publishing_channels",
-        "check_approval",
-        "check_x_mentions",
-        "check_post_performance",
-        "poll_service_result",
-        "reconcile_purchases",
-        "evaluate_marketplace_bid",
-    }
-)
-
 
 class PolicyViolationError(Exception):
     """Raised when a policy evaluation blocks or escalates an action.
@@ -181,6 +146,19 @@ class PolicyMiddleware:
         import asyncio
 
         async def wrapped(*args: Any, **kwargs: Any) -> Any:
+            if tool_name not in KNOWN_ACTIONS:
+                policy_result = self.evaluate_action(tool_name, dict(kwargs))
+                payload = {
+                    "error": "Policy denied this action",
+                    "policy_decision": "deny",
+                    "evidence": list(policy_result.evidence),
+                    "result_digest": policy_result.result_digest,
+                    "explanation": policy_result.explain(),
+                }
+                if policy_result.trace is not None:
+                    payload["decision_trace"] = policy_result.trace.to_dict()
+                return payload
+
             # Skip evaluation for read-only actions
             if tool_name in _BYPASS_ACTIONS:
                 result = tool_fn(*args, **kwargs)
@@ -199,11 +177,11 @@ class PolicyMiddleware:
             params = dict(kwargs)
             # Attempt to map positional args to parameter names
             import inspect
+
             try:
                 sig = inspect.signature(tool_fn)
                 param_names = [
-                    n for n, p in sig.parameters.items()
-                    if n not in ("self", "cls")
+                    n for n, p in sig.parameters.items() if n not in ("self", "cls")
                 ]
                 for i, val in enumerate(args):
                     if i < len(param_names):
@@ -259,11 +237,20 @@ class PolicyMiddleware:
         """
         if self._loader is None:
             return False
-        fresh = self._loader.reload_if_stale()
-        if fresh is not None:
-            self._engine.load(fresh)
+        try:
+            fresh = self._loader.reload_if_stale()
+            if fresh is None:
+                return False
+            self._engine.reload(fresh)
+            self._loader.mark_reload_succeeded(fresh)
             return True
-        return False
+        except (OSError, PolicyLoadError, PolicyReloadError) as exc:
+            self._loader.mark_reload_failed()
+            logger.error(
+                "Policy reload failed; retaining last-known-good policy snapshot: %s",
+                exc,
+            )
+            return False
 
 
 # ── Convenience: single global middleware instance ────────────────────────────

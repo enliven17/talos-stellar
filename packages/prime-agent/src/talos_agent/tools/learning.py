@@ -128,7 +128,9 @@ async def record_performance(
     clamped_metrics: dict[str, int] = {}
     for name, val in raw_metrics.items():
         if isinstance(val, bool) or not isinstance(val, (int, float)):
-            return {"error": f"Metric '{name}' must be an integer, got {type(val).__name__}"}
+            return {
+                "error": f"Metric '{name}' must be an integer, got {type(val).__name__}"
+            }
         if isinstance(val, float):
             if not math.isfinite(val) or not val.is_integer():
                 return {"error": f"Metric '{name}' must be an integer, got {val}"}
@@ -138,7 +140,9 @@ async def record_performance(
         max_limit = MAX_METRIC_VALUES.get(name, MAX_METRIC_DEFAULT)
         clamped_metrics[name] = min(val, max_limit)
 
-    channel_clean = channel.strip() if isinstance(channel, str) and channel.strip() else "X"
+    channel_clean = (
+        channel.strip() if isinstance(channel, str) and channel.strip() else "X"
+    )
 
     db.record_performance(
         content_id=content_id,
@@ -164,7 +168,10 @@ async def run_performance_review() -> dict:
     recent = _deps().db.get_content_with_performance(20)
 
     if not recent or summary.get("total_posts", 0) == 0:
-        return {"status": "insufficient_data", "message": "Not enough performance data yet. Measure more posts first."}
+        return {
+            "status": "insufficient_data",
+            "message": "Not enough performance data yet. Measure more posts first.",
+        }
 
     # Build analysis prompt for LLM
     analysis_data = {
@@ -183,7 +190,9 @@ async def run_performance_review() -> dict:
         ],
     }
 
-    client = get_openai_client(_deps().settings.llm_api_key, _deps().settings.llm_base_url)
+    client = get_openai_client(
+        _deps().settings.llm_api_key, _deps().settings.llm_base_url
+    )
     response = await client.chat.completions.create(
         model=_deps().settings.llm_model,
         messages=[
@@ -286,9 +295,14 @@ async def evolve_strategy() -> dict:
     summary = _deps().db.get_performance_summary(14)
 
     if not learnings:
-        return {"status": "no_learnings", "message": "Run performance reviews first to accumulate learnings."}
+        return {
+            "status": "no_learnings",
+            "message": "Run performance reviews first to accumulate learnings.",
+        }
 
-    client = get_openai_client(_deps().settings.llm_api_key, _deps().settings.llm_base_url)
+    client = get_openai_client(
+        _deps().settings.llm_api_key, _deps().settings.llm_base_url
+    )
     response = await client.chat.completions.create(
         model=_deps().settings.llm_model,
         messages=[
@@ -319,7 +333,14 @@ async def evolve_strategy() -> dict:
                             }
                             for learning in learnings
                         ],
-                        "top_performing_content": [{"content": t["content"][:120], "likes": t["likes"], "reposts": t["reposts"]} for t in top],
+                        "top_performing_content": [
+                            {
+                                "content": t["content"][:120],
+                                "likes": t["likes"],
+                                "reposts": t["reposts"],
+                            }
+                            for t in top
+                        ],
                         "audience_segments": audience,
                         "performance_summary_14d": summary,
                     },
@@ -339,10 +360,14 @@ async def evolve_strategy() -> dict:
     _deps().db.save_playbook(name, playbook_data, source_talos="self")
 
     # Auto-apply the new playbook
-    row = _deps().db._conn.execute(
-        "SELECT id FROM playbooks WHERE name = ? ORDER BY purchased_at DESC LIMIT 1",
-        (name,),
-    ).fetchone()
+    row = (
+        _deps()
+        .db._conn.execute(
+            "SELECT id FROM playbooks WHERE name = ? ORDER BY purchased_at DESC LIMIT 1",
+            (name,),
+        )
+        .fetchone()
+    )
     if row:
         _deps().db.apply_playbook(row["id"])
 
@@ -371,4 +396,3 @@ async def evict_expired_learnings() -> dict:
         "evicted": result["evicted"],
         "ids": result["ids"],
     }
-

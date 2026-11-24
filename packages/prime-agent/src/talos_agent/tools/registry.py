@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping, get_type_hints
 
 from talos_agent import metrics
 from talos_agent.config import Settings, resolve_setting_secret
+from talos_agent.http import ToolTimeoutError
 from talos_agent.redact import redact_text
 from talos_agent.tracing import traced_span
 from talos_agent.tools import context as _context
@@ -33,10 +34,6 @@ MAX_ERROR_MESSAGE_LEN = 1000
 MAX_VALUE_REPR_LEN = 100
 
 CODE_INVALID_ARGUMENTS = "INVALID_TOOL_ARGUMENTS"
-
-
-class _ToolTimeoutError(Exception):
-    """Raised when a tool itself raises TimeoutError, distinct from wait_for expiry."""
 
 
 def _validate_tool_timeout(timeout: float | None) -> float:
@@ -176,7 +173,9 @@ def _validate_and_coerce_value(
     elif isinstance(val, float) and not math.isfinite(val):
         actual_type = "non-finite float"
 
-    type_str = ", ".join(types) if isinstance(expected_type, list) else str(expected_type)
+    type_str = (
+        ", ".join(types) if isinstance(expected_type, list) else str(expected_type)
+    )
     val_repr = redact_text(str(val))
     if len(val_repr) > MAX_VALUE_REPR_LEN:
         val_repr = val_repr[: MAX_VALUE_REPR_LEN - 3] + "..."
@@ -245,9 +244,8 @@ def validate_tool_arguments(
         elif arguments[req_field] is None:
             prop_schema = properties.get(req_field, {})
             allowed_types = prop_schema.get("type")
-            is_nullable = (
-                allowed_types == "null"
-                or (isinstance(allowed_types, (list, tuple)) and "null" in allowed_types)
+            is_nullable = allowed_types == "null" or (
+                isinstance(allowed_types, (list, tuple)) and "null" in allowed_types
             )
             if not is_nullable:
                 errors.append(
@@ -400,16 +398,13 @@ class ToolRegistry:
         # Fallback to function signature schema if empty parameters provided
         # for a function that expects arguments.
         if (
-            (
-                not parameters
-                or (
-                    isinstance(parameters, dict)
-                    and not parameters.get("properties")
-                    and not parameters.get("required")
-                )
+            not parameters
+            or (
+                isinstance(parameters, dict)
+                and not parameters.get("properties")
+                and not parameters.get("required")
             )
-            and callable(fn)
-        ):
+        ) and callable(fn):
             derived = _fn_to_json_schema(fn)
             if derived.get("properties"):
                 parameters = derived
@@ -515,9 +510,7 @@ class ToolRegistry:
         # before permissions, policy engine, or tool code run.
         validation_result = self.validate_arguments(tool, arguments)
         if not validation_result.is_valid:
-            self._record_validation_event(
-                name, validation_result.errors, arguments
-            )
+            self._record_validation_event(name, validation_result.errors, arguments)
             return validation_result.to_error_dict(name)
 
         validated_arguments = validation_result.coerced_arguments
@@ -543,10 +536,9 @@ class ToolRegistry:
                 from talos_agent.policy.middleware import (
                     _GATED_ACTIONS,
                 )
+
                 if name in _GATED_ACTIONS:
-                    result = self._middleware.evaluate_action(
-                        name, validated_arguments
-                    )
+                    result = self._middleware.evaluate_action(name, validated_arguments)
                     if result.decision.value == "deny":
                         return {
                             "error": "Policy denied this action",
@@ -579,24 +571,23 @@ class ToolRegistry:
                     "tool.arg_keys": list(validated_arguments.keys()),
                 },
             ):
-                async def _invoke_tool() -> Any:
-                    try:
-                        if inspect.iscoroutinefunction(tool.fn):
-                            result = await tool.fn(**validated_arguments)
-                        else:
-                            result = await asyncio.to_thread(
-                                tool.fn, **validated_arguments
-                            )
-                        if inspect.isawaitable(result):
-                            result = await result
-                        return result
-                    except asyncio.TimeoutError as exc:
-                        raise _ToolTimeoutError(str(exc)) from exc
 
-                result = await asyncio.wait_for(
-                    _invoke_tool(), timeout=tool.timeout
-                )
-                return result
+                async def _invoke_tool() -> Any:
+                    if inspect.iscoroutinefunction(tool.fn):
+                        result = await tool.fn(**validated_arguments)
+                    else:
+                        result = await asyncio.to_thread(tool.fn, **validated_arguments)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return result
+
+                try:
+                    result = await asyncio.wait_for(
+                        _invoke_tool(), timeout=tool.timeout
+                    )
+                    return result
+                except (asyncio.TimeoutError, TimeoutError) as exc:
+                    raise ToolTimeoutError(name, tool.timeout) from exc
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
@@ -614,7 +605,12 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
-def tool(name: str, description: str, permissions: ToolPermissions | None = None, timeout: float | None = None):
+def tool(
+    name: str,
+    description: str,
+    permissions: ToolPermissions | None = None,
+    timeout: float | None = None,
+):
     """Decorator to register a function as an agent tool.
 
     Usage:
@@ -633,10 +629,12 @@ def tool(name: str, description: str, permissions: ToolPermissions | None = None
     tool name. New tools must declare theirs — an undeclared tool with no
     legacy entry is denied once enforcement is switched on.
     """
+
     def decorator(fn: Callable) -> Callable:
         params = _fn_to_json_schema(fn)
         registry.register(name, description, fn, params, permissions, timeout)
         return fn
+
     return decorator
 
 
@@ -660,7 +658,6 @@ def _resolve_json_type(hint: Any) -> dict[str, Any]:
     - ``dict[K, V]`` → ``{"type": "object"}``
     - Anything unrecognised → ``{"type": "string"}``
     """
-    import types as _types
     import typing as _typing
 
     origin = _typing.get_origin(hint)
@@ -808,7 +805,10 @@ def build_all_tools(
     from talos_agent.adapters.mastodon import MastodonAdapter, MastodonAdapterConfig
     from talos_agent.adapters.registry import AdapterRegistry
     from talos_agent.adapters.telegram import TelegramAdapter, TelegramAdapterConfig
-    from talos_agent.adapters.telegram_queue import TelegramQueueConfig, TelegramSendQueue
+    from talos_agent.adapters.telegram_queue import (
+        TelegramQueueConfig,
+        TelegramSendQueue,
+    )
     from talos_agent.adapters.x import XAdapter, XAdapterConfig
 
     if settings.adapter_sandbox_enabled:
@@ -839,10 +839,9 @@ def build_all_tools(
                 secrets=sandbox.secrets("x"),
             )
         )
-        if (
-            resolve_setting_secret(settings, "discord_webhook_url")
-            or resolve_setting_secret(settings, "discord_bot_token")
-        ):
+        if resolve_setting_secret(
+            settings, "discord_webhook_url"
+        ) or resolve_setting_secret(settings, "discord_bot_token"):
             adapter_registry.register(
                 DiscordAdapter(
                     DiscordAdapterConfig(
@@ -863,17 +862,20 @@ def build_all_tools(
                     secrets=sandbox.secrets("telegram"),
                     http=sandbox.http("telegram"),
                     queue=(
-                        TelegramSendQueue(db, TelegramQueueConfig.from_settings(settings))
+                        TelegramSendQueue(
+                            db, TelegramQueueConfig.from_settings(settings)
+                        )
                         if settings.telegram_rate_limit_enabled
                         else None
                     ),
                 )
             )
-        mastodon_config = (getattr(settings, "channel_configs", {}) or {}).get("mastodon", {})
-        if (
-            resolve_setting_secret(settings, "mastodon_access_token")
-            and mastodon_config.get("instance_url", "")
-        ):
+        mastodon_config = (getattr(settings, "channel_configs", {}) or {}).get(
+            "mastodon", {}
+        )
+        if resolve_setting_secret(
+            settings, "mastodon_access_token"
+        ) and mastodon_config.get("instance_url", ""):
             adapter_registry.register(
                 MastodonAdapter(
                     MastodonAdapterConfig(
@@ -886,16 +888,16 @@ def build_all_tools(
     else:
         adapter_registry = AdapterRegistry()
         adapter_registry.register(XAdapter(browser, settings))
-        if (
-            resolve_setting_secret(settings, "discord_webhook_url")
-            or resolve_setting_secret(settings, "discord_bot_token")
-        ):
+        if resolve_setting_secret(
+            settings, "discord_webhook_url"
+        ) or resolve_setting_secret(settings, "discord_bot_token"):
             adapter_registry.register(DiscordAdapter(settings))
-        mastodon_config = (getattr(settings, "channel_configs", {}) or {}).get("mastodon", {})
-        if (
-            resolve_setting_secret(settings, "mastodon_access_token")
-            and mastodon_config.get("instance_url", "")
-        ):
+        mastodon_config = (getattr(settings, "channel_configs", {}) or {}).get(
+            "mastodon", {}
+        )
+        if resolve_setting_secret(
+            settings, "mastodon_access_token"
+        ) and mastodon_config.get("instance_url", ""):
             adapter_registry.register(MastodonAdapter(settings))
 
     # This agent's dependencies. Tools run through the registry returned below

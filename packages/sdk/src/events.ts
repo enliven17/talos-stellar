@@ -43,6 +43,33 @@ export const SCHEMA_VERSION_REQUEST_HEADER = "X-Talos-Event-Schema-Version" as c
  */
 export const SCHEMA_VERSION_RESPONSE_HEADER = "X-Talos-Event-Schema-Version-Ack" as const;
 
+/** Maximum public event payload version understood by this SDK build. */
+export const MAX_SUPPORTED_EVENT_PAYLOAD_VERSION = 1 as const;
+
+export class UnsupportedEventPayloadVersionError extends Error {
+  constructor(
+    public readonly version: number,
+    public readonly maxSupportedVersion = MAX_SUPPORTED_EVENT_PAYLOAD_VERSION,
+  ) {
+    super(
+      `Unsupported event payload version: ${version}; maximum supported version is ${maxSupportedVersion}`,
+    );
+    this.name = "UnsupportedEventPayloadVersionError";
+  }
+}
+
+export function validateEventPayloadVersion(
+  payload: unknown,
+  maxSupportedVersion = MAX_SUPPORTED_EVENT_PAYLOAD_VERSION,
+): void {
+  if (typeof payload !== "object" || payload === null) return;
+  const version = (payload as Record<string, unknown>).version;
+  if (version === undefined) return;
+  if (typeof version === "number" && version > maxSupportedVersion) {
+    throw new UnsupportedEventPayloadVersionError(version, maxSupportedVersion);
+  }
+}
+
 // ── Schema version types ───────────────────────────────────────────────────────
 
 /**
@@ -416,6 +443,8 @@ export interface TalosEventStreamOptions {
    * @default false
    */
   strictSchemaVersionCheck?: boolean;
+  /** Maximum public event payload version accepted from SSE payloads. */
+  maxSupportedEventPayloadVersion?: number;
 
   /** Reconnect budget — maximum number of reconnect attempts before giving up. @default 10 */
   maxReconnectAttempts?: number;
@@ -674,6 +703,8 @@ export class TalosEventStream {
       random: opts.random ?? Math.random,
       schemaVersion: opts.schemaVersion ?? TALOS_EVENT_SCHEMA_VERSION,
       strictSchemaVersionCheck: opts.strictSchemaVersionCheck ?? false,
+      maxSupportedEventPayloadVersion:
+        opts.maxSupportedEventPayloadVersion ?? MAX_SUPPORTED_EVENT_PAYLOAD_VERSION,
       maxFieldBytes: opts.maxFieldBytes ?? SSE_MAX_FIELD_BYTES,
       maxDataLines: opts.maxDataLines ?? SSE_MAX_DATA_LINES,
       authHeader: opts.authHeader,
@@ -1177,6 +1208,18 @@ export class TalosEventStream {
   // ── Event dispatch with dedup ──────────────────────────────────────────────
 
   private async _dispatch(evt: TalosStreamEvent): Promise<void> {
+    try {
+      const payload = JSON.parse(evt.data);
+      validateEventPayloadVersion(
+        payload,
+        this.opts.maxSupportedEventPayloadVersion,
+      );
+    } catch (err) {
+      if (err instanceof UnsupportedEventPayloadVersionError) {
+        throw err;
+      }
+    }
+
     // Duplicate suppression
     if (evt.id !== undefined && this.opts.seenStore) {
       const seen = await this.opts.seenStore.has(evt.id);

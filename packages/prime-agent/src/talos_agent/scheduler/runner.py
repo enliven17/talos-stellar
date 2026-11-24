@@ -52,9 +52,13 @@ async def _resolve_talos_config(settings, api, db):
             )
     if talos_config:
         db.set_talos_config(talos_config)
-        console.print(f"[green]Loaded Talos:[/green] {talos_config.get('name', settings.talos_id)}")
+        console.print(
+            f"[green]Loaded Talos:[/green] {talos_config.get('name', settings.talos_id)}"
+        )
     else:
-        console.print("[red]Failed to fetch Talos config. Check API key and Talos ID.[/red]")
+        console.print(
+            "[red]Failed to fetch Talos config. Check API key and Talos ID.[/red]"
+        )
     return talos_config
 
 
@@ -70,7 +74,7 @@ async def _setup_policy(settings, db, talos_config):
     ).lower() in ("true", "1", "yes")
     policy_engine.enabled = policy_enabled
     if policy_enabled:
-        policy_engine.load(policy_loader.load())
+        policy_engine.reload(policy_loader.load())
 
     def _get_budget_context() -> dict[str, float]:
         cfg = db.get_talos_config()
@@ -123,7 +127,9 @@ async def _setup_job_effects(settings, db, api):
     return store, dispatcher
 
 
-async def _build_browser_manager(settings, api, db, tool_context, job_effect_store, job_effect_dispatcher):
+async def _build_browser_manager(
+    settings, api, db, tool_context, job_effect_store, job_effect_dispatcher
+):
     """Start browser and return (state_dict, ensure_browser_healthy callable)."""
     from talos_agent.browser.session import BrowserSession
     from talos_agent.tools.registry import build_all_tools
@@ -131,7 +137,10 @@ async def _build_browser_manager(settings, api, db, tool_context, job_effect_sto
     browser_model_key = settings.llm_api_key
     browser = await BrowserSession.start(model_api_key=browser_model_key)
     tools = build_all_tools(
-        api=api, db=db, browser=browser, settings=settings,
+        api=api,
+        db=db,
+        browser=browser,
+        settings=settings,
         job_effect_store=job_effect_store,
         job_effect_dispatcher=job_effect_dispatcher,
         context=tool_context,
@@ -147,14 +156,22 @@ async def _build_browser_manager(settings, api, db, tool_context, job_effect_sto
     }
 
     async def ensure_browser_healthy() -> bool:
-        return await _check_browser_health(state, settings, api, db, tool_context,
-                                           job_effect_store, job_effect_dispatcher)
+        return await _check_browser_health(
+            state,
+            settings,
+            api,
+            db,
+            tool_context,
+            job_effect_store,
+            job_effect_dispatcher,
+        )
 
     return state, ensure_browser_healthy
 
 
-async def _check_browser_health(state, settings, api, db, tool_context,
-                                job_effect_store, job_effect_dispatcher):
+async def _check_browser_health(
+    state, settings, api, db, tool_context, job_effect_store, job_effect_dispatcher
+):
     """Inner health-check + recovery logic for the browser session."""
     from talos_agent.browser.session import BrowserSession
     from talos_agent.tools.registry import build_all_tools
@@ -165,22 +182,38 @@ async def _check_browser_health(state, settings, api, db, tool_context,
         try:
             replacement = await BrowserSession.start(model_api_key=current_model_key)
             replacement_tools = build_all_tools(
-                api=api, db=db, browser=replacement, settings=settings, context=tool_context,
+                api=api,
+                db=db,
+                browser=replacement,
+                settings=settings,
+                context=tool_context,
             )
             previous = state["browser"]
-            state.update(browser=replacement, tools=replacement_tools,
-                         browser_model_key=current_model_key,
-                         browser_restart_attempts=0, is_degraded=False)
-            log.info("secret_consumer_reloaded", consumer="browser",
-                     secret_name="llm_api_key", outcome="success")
+            state.update(
+                browser=replacement,
+                tools=replacement_tools,
+                browser_model_key=current_model_key,
+                browser_restart_attempts=0,
+                is_degraded=False,
+            )
+            log.info(
+                "secret_consumer_reloaded",
+                consumer="browser",
+                secret_name="llm_api_key",
+                outcome="success",
+            )
             try:
                 await asyncio.wait_for(previous.close(), timeout=5)
             except Exception:
                 pass
         except Exception as exc:
-            log.warning("secret_consumer_reload_failed", consumer="browser",
-                        secret_name="llm_api_key", outcome="failure",
-                        error_type=type(exc).__name__)
+            log.warning(
+                "secret_consumer_reload_failed",
+                consumer="browser",
+                secret_name="llm_api_key",
+                outcome="failure",
+                error_type=type(exc).__name__,
+            )
 
     if state["is_degraded"]:
         return False
@@ -196,7 +229,9 @@ async def _check_browser_health(state, settings, api, db, tool_context,
     if is_healthy:
         return True
 
-    console.print("[yellow]Browser session health check failed. Attempting recovery...[/yellow]")
+    console.print(
+        "[yellow]Browser session health check failed. Attempting recovery...[/yellow]"
+    )
     while state["browser_restart_attempts"] < max_restart_attempts:
         state["browser_restart_attempts"] += 1
         console.print(
@@ -209,9 +244,14 @@ async def _check_browser_health(state, settings, api, db, tool_context,
                     await asyncio.wait_for(state["browser"].close(), timeout=3)
                 except Exception:
                     pass
-            state["browser"] = await BrowserSession.start(model_api_key=settings.llm_api_key)
+            state["browser"] = await BrowserSession.start(
+                model_api_key=settings.llm_api_key
+            )
             state["tools"] = build_all_tools(
-                api=api, db=db, browser=state["browser"], settings=settings,
+                api=api,
+                db=db,
+                browser=state["browser"],
+                settings=settings,
                 job_effect_store=job_effect_store,
                 job_effect_dispatcher=job_effect_dispatcher,
                 context=tool_context,
@@ -228,7 +268,9 @@ async def _check_browser_health(state, settings, api, db, tool_context,
             )
             await asyncio.sleep(2)
 
-    console.print("[bold red]Maximum browser restart attempts reached. Marking agent runtime status as degraded.[/bold red]")
+    console.print(
+        "[bold red]Maximum browser restart attempts reached. Marking agent runtime status as degraded.[/bold red]"
+    )
     state["is_degraded"] = True
     try:
         await api.update_status(settings.talos_id, online=True)
@@ -291,7 +333,9 @@ async def _run_reconcile(db, api):
                 + "[/yellow]"
             )
     except Exception as exc:
-        console.print(f"[yellow]Restore reconciliation failed (non-fatal): {exc}[/yellow]")
+        console.print(
+            f"[yellow]Restore reconciliation failed (non-fatal): {exc}[/yellow]"
+        )
         logger.warning("reconcile_after_restore failed: %s", exc)
 
 
@@ -302,7 +346,9 @@ async def _graceful_shutdown(tasks, settings, db, shutdown_drain_complete):
 
     deadline = settings.shutdown_deadline
     if deadline > 0:
-        console.print(f"[yellow]Waiting up to {deadline:.0f}s for in-flight tasks to finish...[/yellow]")
+        console.print(
+            f"[yellow]Waiting up to {deadline:.0f}s for in-flight tasks to finish...[/yellow]"
+        )
         try:
             await asyncio.wait_for(
                 asyncio.shield(asyncio.gather(*drain_tasks, return_exceptions=True)),
@@ -326,7 +372,10 @@ async def _graceful_shutdown(tasks, settings, db, shutdown_drain_complete):
                 except Exception:
                     pass
             try:
-                from talos_agent.tools.browser import cleanup_browser_sessions_on_cancellation
+                from talos_agent.tools.browser import (
+                    cleanup_browser_sessions_on_cancellation,
+                )
+
                 await cleanup_browser_sessions_on_cancellation()
             except Exception:
                 pass
@@ -335,7 +384,10 @@ async def _graceful_shutdown(tasks, settings, db, shutdown_drain_complete):
             await asyncio.gather(*drain_tasks, return_exceptions=True)
     else:
         try:
-            from talos_agent.tools.browser import cleanup_browser_sessions_on_cancellation
+            from talos_agent.tools.browser import (
+                cleanup_browser_sessions_on_cancellation,
+            )
+
             await cleanup_browser_sessions_on_cancellation()
         except Exception:
             pass
@@ -349,10 +401,14 @@ async def _graceful_shutdown(tasks, settings, db, shutdown_drain_complete):
 
     try:
         from talos_agent.tools.commerce import release_claimed_jobs
+
         released, release_failures = await release_claimed_jobs()
         if released or release_failures:
-            log.info("job_shutdown_drain_complete", released=released,
-                     release_failures=release_failures)
+            log.info(
+                "job_shutdown_drain_complete",
+                released=released,
+                release_failures=release_failures,
+            )
     except Exception as exc:
         logger.warning("job_shutdown_release_failed", error_type=type(exc).__name__)
 
@@ -378,6 +434,29 @@ def _build_task_list(
     adapter_health_reporter,
 ) -> list:
     """Create and return all asyncio Tasks for the agent run loop."""
+    from talos_agent.scheduler.policy import validate_recurring_task_interval
+
+    validate_recurring_task_interval(
+        "dividend_distribution",
+        settings.dividend_distribution_interval,
+    )
+    validate_recurring_task_interval(
+        "agent_cycle",
+        settings.agent_cycle_interval,
+    )
+    validate_recurring_task_interval(
+        "polling",
+        settings.polling_interval,
+    )
+    validate_recurring_task_interval(
+        "heartbeat",
+        settings.heartbeat_interval,
+    )
+    validate_recurring_task_interval(
+        "job_heartbeat",
+        settings.job_heartbeat_interval,
+    )
+
     from talos_agent.scheduler.tasks import (
         activity_flush_task,
         agent_cycle_task,
@@ -404,8 +483,11 @@ def _build_task_list(
     task_list = [
         asyncio.create_task(
             agent_cycle_task(
-                **_shared, agent_lock=agent_lock, tools=tools,
-                policy_engine=policy_engine, policy_middleware=policy_middleware,
+                **_shared,
+                agent_lock=agent_lock,
+                tools=tools,
+                policy_engine=policy_engine,
+                policy_middleware=policy_middleware,
                 ensure_browser_healthy=ensure_browser_healthy,
                 effective_clock=effective_clock,
                 task_slots=task_slots,
@@ -435,7 +517,9 @@ def _build_task_list(
         ),
         asyncio.create_task(
             learning_cycle_task(
-                **_shared, agent_lock=agent_lock, tools=tools,
+                **_shared,
+                agent_lock=agent_lock,
+                tools=tools,
                 ensure_browser_healthy=ensure_browser_healthy,
                 effective_clock=effective_clock,
                 task_slots=task_slots,
@@ -444,8 +528,9 @@ def _build_task_list(
         ),
         asyncio.create_task(
             dividend_distribution_task(
-                **_shared, stellar=stellar, effective_clock=effective_clock,
-                task_slots=task_slots,
+                **_shared,
+                stellar=stellar,
+                effective_clock=effective_clock,
             ),
             name="dividend_distribution",
         ),
@@ -457,7 +542,8 @@ def _build_task_list(
         ),
         asyncio.create_task(
             telemetry_log_task(
-                **_shared, adapter_health_reporter=adapter_health_reporter,
+                **_shared,
+                adapter_health_reporter=adapter_health_reporter,
                 policy_engine=policy_engine,
                 task_slots=task_slots,
             ),
@@ -468,9 +554,10 @@ def _build_task_list(
         task_list.append(
             asyncio.create_task(
                 job_effect_dispatch_task(
-                    shutdown_event=shutdown_event, settings=settings,
-                    db=db, job_effect_dispatcher=job_effect_dispatcher,
-                    task_slots=task_slots,
+                    shutdown_event=shutdown_event,
+                    settings=settings,
+                    db=db,
+                    job_effect_dispatcher=job_effect_dispatcher,
                 ),
                 name="job_effect_dispatch",
             )
@@ -505,11 +592,14 @@ async def _cleanup(api, browser_state, settings, db):
     """Final cleanup: go offline, close browser/API, flush metrics."""
     console.print("[yellow]Cleaning up...[/yellow]")
     try:
-        await asyncio.wait_for(api.update_status(settings.talos_id, online=False), timeout=5)
+        await asyncio.wait_for(
+            api.update_status(settings.talos_id, online=False), timeout=5
+        )
     except Exception:
         pass
     try:
         from talos_agent.tools.browser import cleanup_browser_sessions_on_cancellation
+
         await asyncio.wait_for(cleanup_browser_sessions_on_cancellation(), timeout=5)
     except Exception:
         try:
@@ -544,6 +634,7 @@ async def run(settings: "Settings", agent_slot: int = 0) -> None:
     )
     if settings.secret_rotation_enabled:
         from talos_agent.secret_store import build_secret_store, decode_keyring
+
         secret_store = build_secret_store(
             backend=settings.secret_store_backend,
             db=db,
@@ -562,7 +653,9 @@ async def run(settings: "Settings", agent_slot: int = 0) -> None:
         db.close()
         return
 
-    job_effect_store, job_effect_dispatcher = await _setup_job_effects(settings, db, api)
+    job_effect_store, job_effect_dispatcher = await _setup_job_effects(
+        settings, db, api
+    )
     policy_engine, _policy_loader, policy_middleware = await _setup_policy(
         settings, db, talos_config
     )
@@ -591,17 +684,24 @@ async def run(settings: "Settings", agent_slot: int = 0) -> None:
     await _report_adapter_health(adapter_health_reporter)
 
     if policy_engine.enabled:
-        console.print("[bold cyan]Policy engine ENABLED — actions will be gated.[/bold cyan]")
+        console.print(
+            "[bold cyan]Policy engine ENABLED — actions will be gated.[/bold cyan]"
+        )
     else:
-        console.print("[dim]Policy engine disabled (set POLICY_ENGINE_ENABLED=true to enable).[/dim]")
+        console.print(
+            "[dim]Policy engine disabled (set POLICY_ENGINE_ENABLED=true to enable).[/dim]"
+        )
 
     await _run_reconcile(db, api)
 
     telegram_queue_worker = None
     if settings.telegram_rate_limit_enabled:
         from talos_agent.adapters.telegram_queue import (
-            TelegramQueueConfig, TelegramQueueWorker, TelegramSendQueue,
+            TelegramQueueConfig,
+            TelegramQueueWorker,
+            TelegramSendQueue,
         )
+
         telegram_queue_worker = TelegramQueueWorker(
             TelegramSendQueue(db, TelegramQueueConfig.from_settings(settings)),
             lambda: tool_context.adapter_registry,
@@ -633,12 +733,19 @@ async def run(settings: "Settings", agent_slot: int = 0) -> None:
     async_tasks = _build_task_list(
         shutdown_event=shutdown_event,
         shutdown_drain_complete=shutdown_drain_complete,
-        settings=settings, api=api, db=db, talos_config=talos_config,
-        agent_lock=agent_lock, tools=tools, stellar=stellar,
-        policy_engine=policy_engine, policy_middleware=policy_middleware,
+        settings=settings,
+        api=api,
+        db=db,
+        talos_config=talos_config,
+        agent_lock=agent_lock,
+        tools=tools,
+        stellar=stellar,
+        policy_engine=policy_engine,
+        policy_middleware=policy_middleware,
         ensure_browser_healthy=ensure_browser_healthy,
         effective_clock=effective_clock,
-        job_effect_store=job_effect_store, job_effect_dispatcher=job_effect_dispatcher,
+        job_effect_store=job_effect_store,
+        job_effect_dispatcher=job_effect_dispatcher,
         telegram_queue_worker=telegram_queue_worker,
         adapter_health_reporter=adapter_health_reporter,
     )
@@ -664,6 +771,7 @@ async def run_multi(base_settings: "Settings", api_keys: list[str]) -> None:
 
     async def run_one(api_key: str, slot: int) -> None:
         import copy
+
         agent_settings = copy.copy(base_settings)
         object.__setattr__(agent_settings, "talos_api_key", api_key)
         object.__setattr__(agent_settings, "talos_id", "")
@@ -672,6 +780,4 @@ async def run_multi(base_settings: "Settings", api_keys: list[str]) -> None:
         except Exception as e:
             print(f"[red]Agent {slot} ({api_key[:12]}...) crashed: {e}[/red]")
 
-    await asyncio.gather(*[
-        run_one(key, i + 1) for i, key in enumerate(api_keys)
-    ])
+    await asyncio.gather(*[run_one(key, i + 1) for i, key in enumerate(api_keys)])

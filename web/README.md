@@ -254,19 +254,26 @@ Limits are stored in two Postgres tables (added in migration `0013_add_quota_tab
 
 The increment-then-check pattern costs one DB round-trip per request with no distributed locking.
 
+### Bounded Grace Policy on Store Outage
+
+When the quota store or database is unavailable:
+- **Payment & Privileged Operations**: Always fail-closed (`ok: false`, remaining 0, 429 response) to guarantee atomic budget and settlement integrity.
+- **Standard & Read Operations**: Allowed under a bounded grace window (`QUOTA_STORE_GRACE_TTL_MS`, default: 60s). If the outage exceeds this grace ceiling, requests fail closed until store connectivity is restored.
+
 **Backward compatibility:** quota enforcement is enabled by platform-level defaults inserted by the migration. To disable enforcement for a specific agent or resource, call the `PATCH /api/talos/:id/quota` endpoint with `"enabled": false`.
 
 ### Response headers
 
 Every 2xx write response includes quota state headers:
 
-| Header              | Value                                                                      |
-| ------------------- | -------------------------------------------------------------------------- |
-| `X-Quota-Limit`     | Effective limit for this window                                            |
-| `X-Quota-Remaining` | Remaining calls after this one                                             |
-| `X-Quota-Used`      | Total calls used in this window                                            |
-| `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets (omitted if unknown/invalid) |
-| `X-Quota-Resource`  | Which resource was checked                                                 |
+| Header              | Value                                           |
+| ------------------- | ----------------------------------------------- |
+| `X-Quota-Limit`     | Effective limit for this window                 |
+| `X-Quota-Remaining` | Remaining calls after this one                  |
+| `X-Quota-Used`      | Total calls used in this window                 |
+| `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets |
+| `X-Quota-Resource`  | Which resource was checked                      |
+| `X-Quota-Incremented` | `true` when this decision consumed a unit, `false` when the quota is disabled (no write) or the call was a read-only usage lookup |
 
 When a limit is exceeded the API returns `429 Too Many Requests` with the same `X-Quota-*` headers, a bounded `Retry-After` header (whole seconds), and a JSON body:
 
@@ -275,7 +282,8 @@ When a limit is exceeded the API returns `429 Too Many Requests` with the same `
   "error": "Quota exceeded",
   "resource": "activity_writes",
   "limit": 500,
-  "resetAt": "2026-07-25T00:00:00.000Z"
+  "resetAt": "2026-07-25T00:00:00.000Z",
+  "incremented": true
 }
 ```
 
@@ -332,6 +340,26 @@ Response:
   }
 }
 ```
+
+**Export a reproducible quota-window usage statement:**
+
+```
+GET /api/talos/:id/quota?format=statement&asOf=2026-07-24T12:30:00Z
+Authorization: Bearer <api_key>
+```
+
+Returns a canonical, integer-unit usage statement for the authorized agent with stable UTC window boundaries (`windowStart`/`windowEnd` and integer ms), `sourcePolicyVersion`, per-resource `policySource`, aggregate `totals`, and a deterministic SHA-256 `digest` (also exposed in the `X-Quota-Statement-Digest` header). Private request payloads and operator `notes` are omitted. The `asOf` query parameter is optional (defaults to the current UTC time) and returns `400` if not a valid ISO-8601 timestamp.
+
+**Download an owner financial activity statement:**
+
+```
+GET /api/talos/:id/financial-statement?format=json
+x-talos-owner-address: G...
+x-talos-owner-message: talos:<id>:financial-statement:GET:<13-digit timestamp>
+x-talos-owner-signature: <base64 signature>
+```
+
+Requires a fresh wallet-ownership proof signed with `creatorPublicKey` or `walletPublicKey` (the same proof scheme as scoped API keys, but bound to the `financial-statement` resource). Returns an `attachment` with canonical revenue and approval activity for the agent. Amounts are exact scaled decimal strings at the database's six-decimal precision, statuses are preserved verbatim, and `bound: "unavailable"` means no amount was observed rather than a verified zero. Private API credentials, secrets, and internal/operator notes are never included in the statement. `?format=csv` returns the same activity as a CSV attachment. Both formats include a deterministic `sha256:` digest in the body (JSON) and in the `X-Financial-Statement-Digest` header.
 
 **Override a quota for a specific agent:**
 

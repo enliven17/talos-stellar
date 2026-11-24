@@ -21,7 +21,30 @@ const INSTALL_HINTS = {
   stellar: "Optional: install the Stellar CLI with `cargo install --locked stellar-cli --features opt`.",
 };
 
-function runCommand(command, args, platform = process.platform) {
+export const FAILURE_REASONS = Object.freeze({
+  MISSING: "missing",
+  UNSUPPORTED: "unsupported",
+  EXECUTION_FAILURE: "execution-failure",
+});
+
+function sentence(...parts) {
+  return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function detailSentence(message) {
+  return /[.!?]$/.test(message) ? message : `${message}.`;
+}
+
+function isMissingError(error) {
+  if (error?.code === "ENOENT") return true;
+  return /not found|not recognized as an internal or external command|\bENOENT\b/i.test(String(error?.message ?? ""));
+}
+
+function describeExecutionFailure(error) {
+  return String(error?.message ?? error ?? "").replace(/\s+/g, " ").trim() || "the executable could not be started";
+}
+
+export function runCommand(command, args, platform = process.platform) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
     shell: platform === "win32",
@@ -30,7 +53,9 @@ function runCommand(command, args, platform = process.platform) {
 
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(result.stderr?.trim() || `${command} exited with status ${result.status}`);
+    const error = new Error(result.stderr?.trim() || `${command} exited with status ${result.status}`);
+    error.code = result.status === 127 || result.status === 9009 ? "ENOENT" : "COMMAND_FAILED";
+    throw error;
   }
   return result.stdout.trim();
 }
@@ -48,82 +73,177 @@ function compareVersions(actual, minimum) {
   return 0;
 }
 
-function probe(run, candidates) {
+export function probe(run, candidates) {
+  let failure = null;
   for (const [command, args] of candidates) {
     try {
       const output = run(command, args);
       if (output) return { command, output };
-    } catch {
-      // Try another platform-specific executable name before reporting missing.
+      if (failure?.reason !== FAILURE_REASONS.EXECUTION_FAILURE) {
+        failure = {
+          command,
+          reason: FAILURE_REASONS.EXECUTION_FAILURE,
+          message: `${command} produced no output`,
+        };
+      }
+    } catch (error) {
+      const reason = isMissingError(error) ? FAILURE_REASONS.MISSING : FAILURE_REASONS.EXECUTION_FAILURE;
+      if (reason === FAILURE_REASONS.EXECUTION_FAILURE || failure?.reason !== FAILURE_REASONS.EXECUTION_FAILURE) {
+        failure = {
+          command,
+          reason,
+          message: describeExecutionFailure(error),
+        };
+      }
     }
   }
-  return null;
+  return failure;
 }
 
-function versionResult(name, output, minimum, hint) {
+function failureResult(name, probed, hint, missingMessage) {
+  if (probed?.reason === FAILURE_REASONS.EXECUTION_FAILURE) {
+    return {
+      name,
+      ok: false,
+      reason: FAILURE_REASONS.EXECUTION_FAILURE,
+      message: sentence(`${name} could not be executed (${probed.command}).`, detailSentence(probed.message), hint),
+    };
+  }
+  return {
+    name,
+    ok: false,
+    reason: FAILURE_REASONS.MISSING,
+    message: missingMessage ?? `${name} not found. ${hint}`,
+  };
+}
+
+function presenceResult(name, probed, { describe, hint, missingMessage, optional = false }) {
+  const optionalField = optional ? { optional: true } : {};
+  if (!probed || probed.reason === FAILURE_REASONS.MISSING) {
+    return { name, ok: false, reason: FAILURE_REASONS.MISSING, message: missingMessage, ...optionalField };
+  }
+  if (probed.reason === FAILURE_REASONS.EXECUTION_FAILURE) {
+    return { ...failureResult(name, probed, hint, missingMessage), ...optionalField };
+  }
+  return { name, ok: true, message: describe(probed), ...optionalField };
+}
+
+function versionResult(name, output, minimum, hint, id) {
+  const expected = `>=${minimum.join(".")}`;
   if (!output) {
-    return { name, ok: false, message: `${name} not found. ${hint}` };
+    return {
+      id,
+      name,
+      ok: false,
+      severity: "error",
+      code: "tool_missing",
+      expected,
+      observed: null,
+      message: `${name} not found. ${hint}`,
+    };
   }
 
   const version = parseVersion(output);
   if (!version) {
-    return { name, ok: false, message: `Could not read the ${name} version from “${output}”. ${hint}` };
+    return {
+      id,
+      name,
+      ok: false,
+      severity: "error",
+      code: "version_unrecognized",
+      expected,
+      observed: null,
+      message: `Could not read the ${name} version; expected ${expected}. ${hint}`,
+    };
   }
 
   const versionText = version.join(".");
   if (compareVersions(version, minimum) < 0) {
     const minimumText = minimum.join(".");
     return {
+      id,
       name,
       ok: false,
+      severity: "error",
+      code: "version_mismatch",
+      expected,
+      observed: versionText,
       message: `${name} ${versionText} is too old; ${minimumText} or newer is required. ${hint}`,
     };
   }
-  return { name, ok: true, message: `${name} ${versionText}` };
+  return {
+    id,
+    name,
+    ok: true,
+    severity: "info",
+    code: "ok",
+    expected,
+    observed: versionText,
+    message: `${name} ${versionText}`,
+  };
+}
+
+function probedVersionResult(name, probed, minimum, hint) {
+  if (!probed || probed.reason) return failureResult(name, probed, hint);
+  return versionResult(name, probed.output, minimum, hint);
 }
 
 export function diagnose({ run = runCommand, platform = process.platform, nodeVersion = process.version } = {}) {
   const results = [];
-  const node = versionResult("Node.js", nodeVersion, MINIMUMS.node, INSTALL_HINTS.node);
+  const node = versionResult("Node.js", nodeVersion, MINIMUMS.node, INSTALL_HINTS.node, "node");
   results.push(node);
 
   const windows = platform === "win32";
   const pnpm = probe(run, windows
     ? [["pnpm", ["--version"]], ["pnpm.cmd", ["--version"]]]
     : [["pnpm", ["--version"]]]);
-  results.push(versionResult("pnpm", pnpm?.output, MINIMUMS.pnpm, INSTALL_HINTS.pnpm));
+  results.push(versionResult("pnpm", pnpm?.output, MINIMUMS.pnpm, INSTALL_HINTS.pnpm, "pnpm"));
 
   const pythonCandidates = windows
     ? [["py", ["-3", "--version"]], ["python", ["--version"]], ["python3", ["--version"]]]
     : [["python3", ["--version"]], ["python", ["--version"]]];
   const python = probe(run, pythonCandidates);
-  results.push(versionResult("Python", python?.output, MINIMUMS.python, INSTALL_HINTS.python));
+  results.push(versionResult("Python", python?.output, MINIMUMS.python, INSTALL_HINTS.python, "python"));
 
   const uv = probe(run, windows
     ? [["uv", ["--version"]], ["uv.exe", ["--version"]]]
     : [["uv", ["--version"]]]);
+  const uvVersion = uv ? parseVersion(uv.output) : null;
+  const uvObserved = uvVersion?.join(".") ?? null;
   results.push({
+    id: "uv",
     name: "uv",
-    ok: Boolean(uv),
-    message: uv ? `uv ${parseVersion(uv.output)?.join(".") ?? uv.output}` : `uv not found. ${INSTALL_HINTS.uv}`,
+    ok: Boolean(uvVersion),
+    severity: uvVersion ? "info" : "error",
+    code: uv ? (uvVersion ? "ok" : "version_unrecognized") : "tool_missing",
+    expected: "installed (any version)",
+    observed: uvObserved,
+    message: uvVersion
+      ? `uv ${uvObserved}`
+      : uv
+        ? `Could not read the uv version; expected an installed version. ${INSTALL_HINTS.uv}`
+        : `uv not found. ${INSTALL_HINTS.uv}`,
   });
 
   const rustc = probe(run, [["rustc", ["--version"]]]);
   results.push({
-    name: "Rust compiler",
-    ...versionResult("Rust compiler", rustc?.output, [1, 0, 0], INSTALL_HINTS.rustc),
+    ...versionResult("Rust compiler", rustc?.output, [1, 0, 0], INSTALL_HINTS.rustc, "rustc"),
   });
   const cargo = probe(run, [["cargo", ["--version"]]]);
   results.push({
-    name: "Cargo",
-    ...versionResult("Cargo", cargo?.output, [1, 0, 0], INSTALL_HINTS.cargo),
+    ...versionResult("Cargo", cargo?.output, [1, 0, 0], INSTALL_HINTS.cargo, "cargo"),
   });
 
   const target = rustc && probe(run, [["rustup", ["target", "list", "--installed"]]]);
   const targetInstalled = target?.output.split(/\s+/).includes("wasm32-unknown-unknown") ?? false;
   results.push({
+    id: "rust_wasm_target",
     name: "Rust Wasm target",
     ok: targetInstalled,
+    severity: targetInstalled ? "info" : "error",
+    code: targetInstalled ? "ok" : "target_missing",
+    expected: "wasm32-unknown-unknown",
+    observed: targetInstalled ? "installed" : "not installed",
     message: targetInstalled
       ? "wasm32-unknown-unknown installed"
       : `wasm32-unknown-unknown is not installed. ${INSTALL_HINTS.rustTarget}`,
@@ -133,25 +253,30 @@ export function diagnose({ run = runCommand, platform = process.platform, nodeVe
     ? [["docker", ["--version"]], ["docker.exe", ["--version"]]]
     : [["docker", ["--version"]]]);
   results.push({
-    name: "Docker",
-    ...versionResult("Docker", docker?.output, [1, 0, 0], INSTALL_HINTS.docker),
+    ...versionResult("Docker", docker?.output, [1, 0, 0], INSTALL_HINTS.docker, "docker"),
   });
 
   const stellar = probe(run, windows
     ? [["stellar", ["--version"]], ["stellar.exe", ["--version"]]]
     : [["stellar", ["--version"]]]);
-  const stellarVersion = stellar?.output.split(/\s+/).slice(0, 2).join(" ");
+  const parsedStellarVersion = stellar ? parseVersion(stellar.output) : null;
+  const stellarVersion = parsedStellarVersion?.join(".") ?? null;
   results.push({
+    id: "stellar",
     name: "Stellar CLI",
     ok: Boolean(stellar),
+    severity: stellar ? "info" : "warning",
+    code: !stellar ? "optional_tool_missing" : parsedStellarVersion ? "ok" : "version_unrecognized",
+    expected: "optional",
+    observed: stellarVersion,
     optional: true,
-    message: stellar ? stellarVersion : `not installed (optional). ${INSTALL_HINTS.stellar}`,
+    message: stellar
+      ? (stellarVersion ? `stellar ${stellarVersion}` : "installed (version unavailable; optional)")
+      : `not installed (optional). ${INSTALL_HINTS.stellar}`,
   });
 
-  return {
-    results,
-    exitCode: results.some((result) => !result.ok && !result.optional) ? 1 : 0,
-  };
+  const failedRequired = results.some((result) => !result.ok && !result.optional);
+  return { results, exitCode: failedRequired ? 1 : 0 };
 }
 
 export function formatReport({ results }) {
@@ -163,9 +288,13 @@ export function formatReport({ results }) {
   return lines.join("\n");
 }
 
-function main() {
+export function formatJsonReport({ results, exitCode }) {
+  return JSON.stringify({ exitCode, findings: results }, null, 2);
+}
+
+function main(args = process.argv.slice(2)) {
   const report = diagnose();
-  console.log(formatReport(report));
+  console.log(args.includes("--json") ? formatJsonReport(report) : formatReport(report));
   process.exitCode = report.exitCode;
 }
 

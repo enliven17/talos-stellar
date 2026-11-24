@@ -22,141 +22,21 @@ if TYPE_CHECKING:
     from talos_agent.clock import ClockProtocol
 
 
-@dataclass(frozen=True)
-class SchedulerConsistencyReport:
-    """Read-only comparison of persisted scheduler identities and live tasks."""
-
-    matched: tuple[str, ...]
-    orphaned_durable: tuple[str, ...]
-    untracked_active: tuple[str, ...]
-    uncertain: tuple[str, ...]
-    recovery_plan: tuple[str, ...]
+MIN_RECURRING_INTERVAL_SECONDS = 1.0
+MIN_RECURRING_TASK_INTERVAL_SECONDS = MIN_RECURRING_INTERVAL_SECONDS
 
 
-def build_consistency_report(
-    durable_execution_ids: set[str] | frozenset[str] | list[str] | tuple[str, ...],
-    active_task_ids: set[str] | frozenset[str] | list[str] | tuple[str, ...],
-    *,
-    durable_source_available: bool = True,
-    active_source_available: bool = True,
-) -> SchedulerConsistencyReport:
-    """Compare durable execution identities with active asyncio task names.
-
-    This function never mutates state or requeues work. If either observation
-    source is unavailable, the affected side is reported as uncertain instead
-    of being treated as orphaned, preventing an unsafe recovery decision.
-    """
-    durable = set(durable_execution_ids)
-    active = set(active_task_ids)
-    matched = tuple(sorted(durable & active))
-    orphaned = tuple(sorted(durable - active)) if durable_source_available and active_source_available else ()
-    untracked = tuple(sorted(active - durable)) if durable_source_available and active_source_available else ()
-    uncertain: list[str] = []
-    if not durable_source_available:
-        uncertain.append("durable execution store unavailable")
-    if not active_source_available:
-        uncertain.append("active asyncio task snapshot unavailable")
-
-    plan = [
-        "Inspect orphaned durable executions and verify lease ownership before recovery.",
-        "Do not requeue or cancel work from this report; an operator must confirm the state.",
-    ]
-    if orphaned:
-        plan.insert(0, f"Review {len(orphaned)} durable execution(s) with no matching active task.")
-    if uncertain:
-        plan.insert(0, "Retry the observation before making a recovery decision.")
-
-    return SchedulerConsistencyReport(
-        matched=matched,
-        orphaned_durable=orphaned,
-        untracked_active=untracked,
-        uncertain=tuple(uncertain),
-        recovery_plan=tuple(plan),
-    )
-
-
-MissedRunPolicy = Literal["skip", "coalesce", "catch_up"]
-
-
-@dataclass(frozen=True)
-class IntervalRunDecision:
-    """Bounded execution plan for a recurring interval task."""
-
-    policy: MissedRunPolicy
-    due_runs: int
-    runs_to_execute: int
-    lateness_seconds: float
-    next_run_in_seconds: float
-
-
-def plan_interval_runs(
-    now: datetime,
-    last_run: datetime | None,
-    interval_seconds: float,
-    *,
-    policy: MissedRunPolicy = "coalesce",
-    max_catch_up_runs: int = 3,
-) -> IntervalRunDecision:
-    """Plan interval work and report lateness relative to its earliest due slot.
-
-    ``skip`` executes one due run normally, but drops all work when multiple
-    interval slots accumulated. ``coalesce`` executes once regardless of
-    backlog. ``catch_up`` executes at most ``max_catch_up_runs``.
-    """
-    if policy not in ("skip", "coalesce", "catch_up"):
-        raise ValueError("policy must be 'skip', 'coalesce', or 'catch_up'")
-    try:
-        interval = float(interval_seconds)
-    except (OverflowError, TypeError, ValueError):
-        interval = math.nan
+def validate_recurring_task_interval(task_name: str, interval_seconds: float) -> None:
+    """Validate a recurring task interval before it is used for a timer."""
     if (
-        isinstance(interval_seconds, bool)
-        or not isinstance(interval_seconds, (int, float))
-        or not math.isfinite(interval)
-        or interval <= 0
+        not isinstance(interval_seconds, (int, float))
+        or isinstance(interval_seconds, bool)
+        or interval_seconds < MIN_RECURRING_TASK_INTERVAL_SECONDS
     ):
-        raise ValueError("interval_seconds must be a finite number greater than 0")
-    if (
-        isinstance(max_catch_up_runs, bool)
-        or not isinstance(max_catch_up_runs, int)
-        or not 1 <= max_catch_up_runs <= 10
-    ):
-        raise ValueError("max_catch_up_runs must be an integer between 1 and 10")
-
-    if last_run is None:
-        return IntervalRunDecision(policy, 1, 1, 0.0, 0.0)
-
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    if last_run.tzinfo is None:
-        last_run = last_run.replace(tzinfo=timezone.utc)
-
-    elapsed = (now - last_run).total_seconds()
-    if elapsed < interval:
-        return IntervalRunDecision(
-            policy,
-            0,
-            0,
-            0.0,
-            interval - max(elapsed, 0.0),
+        raise ValueError(
+            f"Recurring task '{task_name}' interval must be at least "
+            f"{MIN_RECURRING_TASK_INTERVAL_SECONDS:g} seconds"
         )
-
-    due_runs = Fraction.from_float(elapsed) // Fraction.from_float(interval)
-    lateness_seconds = max(elapsed - interval, 0.0)
-    if policy == "skip":
-        runs_to_execute = 1 if due_runs == 1 else 0
-    elif policy == "coalesce":
-        runs_to_execute = 1
-    else:
-        runs_to_execute = min(due_runs, max_catch_up_runs)
-
-    return IntervalRunDecision(
-        policy=policy,
-        due_runs=due_runs,
-        runs_to_execute=runs_to_execute,
-        lateness_seconds=lateness_seconds,
-        next_run_in_seconds=0.0,
-    )
 
 
 def check_should_run(
@@ -199,6 +79,9 @@ def check_should_run(
     clock:
         Unused; accepted for API symmetry with call sites that pass a clock.
     """
+    if interval_seconds is not None:
+        validate_recurring_task_interval("scheduler", interval_seconds)
+
     if last_run is None:
         return True
 
@@ -247,3 +130,62 @@ def check_should_run(
 
     # Fallback: always run.
     return True
+
+
+def check_task_eligibility(
+    now: datetime,
+    task_name: str,
+    db: object,
+    talos_id: str | None = None,
+) -> tuple[bool, datetime | None]:
+    """Check whether a task is eligible to run according to its retry / failure state.
+
+    Parameters
+    ----------
+    now:
+        Current time (timezone-aware).
+    task_name:
+        Name of the task being checked.
+    db:
+        Database instance providing ``get_task_failure_history`` or ``get_retry_state``.
+    talos_id:
+        Optional agent identifier for agent-specific failure history.
+
+    Returns
+    -------
+    tuple[bool, datetime | None]
+        ``(is_eligible, next_eligible_at)``
+        If currently backed off, returns ``(False, next_eligible_at)``.
+        If eligible or no failure/backoff state exists, returns ``(True, next_eligible_at)``.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    next_eligible_at: datetime | None = None
+
+    # Check failure history first if available
+    if hasattr(db, "get_task_failure_history"):
+        try:
+            history = db.get_task_failure_history(talos_id=talos_id, task_name=task_name, limit=1)
+            if history:
+                next_eligible_at = history[0]["next_eligible_at"]
+        except Exception:
+            pass
+
+    # Fall back to retry_state if failure history returned nothing or wasn't available
+    if next_eligible_at is None and hasattr(db, "get_retry_state"):
+        try:
+            state = db.get_retry_state(task_name)
+            if state:
+                next_eligible_at = state.get("next_attempt_at")
+        except Exception:
+            pass
+
+    if next_eligible_at is not None:
+        if next_eligible_at.tzinfo is None:
+            next_eligible_at = next_eligible_at.replace(tzinfo=timezone.utc)
+        if now < next_eligible_at:
+            return False, next_eligible_at
+
+    return True, next_eligible_at
+

@@ -26,20 +26,26 @@ serialising calls to :meth:`load` if concurrency is needed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any
 
-from talos_agent.policy.patterns import compile_glob
+from talos_agent.policy.actions import KNOWN_ACTIONS
 from talos_agent.policy.schema import (
+    ActionDigestMismatchError,
     ActionSpec,
+    ApprovalStatusError,
     ConditionTrace,
     MatchCondition,
     Policy,
-    PolicyException,
+    PolicyApproval,
     PolicyDecision,
     PolicyDecisionTrace,
+    PolicyDigestMismatchError,
     PolicyResult,
     PolicyRule,
     RuleTraceStep,
@@ -48,6 +54,38 @@ from talos_agent.policy.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── Canonical hashing helpers ─────────────────────────────────────────────────
+
+
+def _canonical_rule_dict(rule: PolicyRule) -> dict[str, Any]:
+    return {
+        "rule_id": rule.rule_id,
+        "description": rule.description,
+        "decision": rule.decision.value,
+        "severity": rule.severity.value,
+        "reason": rule.reason,
+        "conditions": [
+            {
+                "field": c.field,
+                "operator": c.operator,
+                "value": c.value,
+            }
+            for c in rule.conditions
+        ],
+    }
+
+
+def _canonical_policy_dict(policy: Policy) -> dict[str, Any]:
+    return {
+        "name": policy.name,
+        "version": policy.version,
+        "priority": policy.priority,
+        "enabled": policy.enabled,
+        "rules": [_canonical_rule_dict(r) for r in policy.rules],
+    }
+
 
 # ── Condition evaluation helpers ──────────────────────────────────────────────
 
@@ -199,6 +237,32 @@ class PolicyEngine:
         self._evaluation_count: int = 0
         self._deny_count: int = 0
         self._escalate_count: int = 0
+        self._policy_digest: str = ""
+        self._recompute_policy_digest()
+
+    def _recompute_policy_digest(self) -> None:
+        self._policy_digest = self.compute_policy_digest()
+
+    def compute_policy_digest(self) -> str:
+        """Compute deterministic SHA-256 digest of active policy rules and engine state."""
+        canonical_state = {
+            "enabled": self._enabled,
+            "policies": [_canonical_policy_dict(p) for p in self._policies],
+        }
+        serialized = json.dumps(
+            canonical_state,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    @property
+    def policy_digest(self) -> str:
+        """Deterministic SHA-256 digest of the current policy ruleset."""
+        if not self._policy_digest:
+            self._recompute_policy_digest()
+        return self._policy_digest
 
     # ── Configuration ─────────────────────────────────────────────────────
 
@@ -210,6 +274,7 @@ class PolicyEngine:
     @enabled.setter
     def enabled(self, value: bool) -> None:
         self._enabled = value
+        self._recompute_policy_digest()
 
     @property
     def policies(self) -> tuple[Policy, ...]:
@@ -259,16 +324,115 @@ class PolicyEngine:
                 key=lambda p: (-p.priority, p.name),
             )
         )
-        self._exceptions = {
-            (policy.name, exception.rule_id): exception
-            for policy in self._policies
-            for exception in policy.exceptions
-        }
+        self._recompute_policy_digest()
         logger.info(
             "PolicyEngine loaded %d policies (%d enabled)",
             len(self._policies),
             sum(1 for p in self._policies if p.enabled),
         )
+
+    def reload(self, policies: list[Policy]) -> None:
+        """Validate and simulate a candidate before replacing the active set.
+
+        A failed candidate leaves the current policy snapshot untouched.
+        """
+        try:
+            candidate = tuple(
+                sorted(policies, key=lambda p: (-p.priority, p.name))
+            )
+            self._validate_candidate(candidate)
+        except PolicyReloadError:
+            raise
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise PolicyReloadError(f"Invalid policy candidate: {exc}") from exc
+
+        staged_engine = PolicyEngine()
+        staged_engine.enabled = True
+        staged_engine._policies = candidate
+
+        try:
+            from talos_agent.policy.simulator import PolicySimulator
+
+            result = PolicySimulator(staged_engine).simulate(
+                "__policy_reload_validation__"
+            )
+        except Exception as exc:
+            raise PolicyReloadError("Policy candidate simulation failed") from exc
+
+        if not result.simulation:
+            raise PolicyReloadError("Policy candidate did not complete in simulation mode")
+
+        self._policies = candidate
+        logger.info(
+            "PolicyEngine reloaded %d policies (%d enabled)",
+            len(self._policies),
+            sum(1 for p in self._policies if p.enabled),
+        )
+
+    @staticmethod
+    def _validate_candidate(policies: tuple[Policy, ...]) -> None:
+        supported_operators = {
+            "eq", "neq", "gt", "gte", "lt", "lte", "in", "not_in",
+            "exists", "regex", "glob",
+        }
+        for policy in policies:
+            if not isinstance(policy, Policy):
+                raise PolicyReloadError("Candidate entries must be Policy instances")
+            if not isinstance(policy.name, str) or not policy.name.strip():
+                raise PolicyReloadError("Policy names must be non-empty strings")
+            if not isinstance(policy.rules, tuple):
+                raise PolicyReloadError(f"Policy '{policy.name}' rules must be a tuple")
+            for rule in policy.rules:
+                if not isinstance(rule, PolicyRule):
+                    raise PolicyReloadError(
+                        f"Policy '{policy.name}' rules must be PolicyRule instances"
+                    )
+                if not isinstance(rule.decision, PolicyDecision):
+                    raise PolicyReloadError(
+                        f"Rule '{rule.rule_id}' has an invalid decision"
+                    )
+                if not isinstance(rule.severity, Severity):
+                    raise PolicyReloadError(
+                        f"Rule '{rule.rule_id}' has an invalid severity"
+                    )
+                for condition in rule.conditions:
+                    if not isinstance(condition, MatchCondition):
+                        raise PolicyReloadError(
+                            f"Rule '{rule.rule_id}' conditions must be MatchCondition instances"
+                        )
+                    if not isinstance(condition.field, str) or not condition.field:
+                        raise PolicyReloadError(
+                            f"Rule '{rule.rule_id}' has an empty condition field"
+                        )
+                    if condition.operator not in supported_operators:
+                        raise PolicyReloadError(
+                            f"Rule '{rule.rule_id}' uses unsupported operator "
+                            f"'{condition.operator}'"
+                        )
+                    if condition.operator == "regex":
+                        try:
+                            re.compile(str(condition.value))
+                        except re.error as exc:
+                            raise PolicyReloadError(
+                                f"Rule '{rule.rule_id}' has an invalid regex condition"
+                            ) from exc
+                    elif condition.operator in {"gt", "gte", "lt", "lte"}:
+                        try:
+                            numeric_value = float(condition.value)
+                        except (TypeError, ValueError) as exc:
+                            raise PolicyReloadError(
+                                f"Rule '{rule.rule_id}' has an invalid numeric condition"
+                            ) from exc
+                        if not math.isfinite(numeric_value):
+                            raise PolicyReloadError(
+                                f"Rule '{rule.rule_id}' has a non-finite numeric condition"
+                            )
+                    elif condition.operator in {"in", "not_in"} and not isinstance(
+                        condition.value, (str, list, tuple, dict, set, frozenset)
+                    ):
+                        raise PolicyReloadError(
+                            f"Rule '{rule.rule_id}' has an invalid membership condition"
+                        )
 
     # ── Evaluation ────────────────────────────────────────────────────────
 
@@ -284,13 +448,31 @@ class PolicyEngine:
         digest of the decision payload for audit trail purposes and an
         explainable :class:`PolicyDecisionTrace`.
 
-        When the engine is **disabled**, this method always returns
-        ``APPROVE`` with an evidence note and a disabled-engine trace.
+        Unknown action categories are denied before policy evaluation, even
+        when the engine is disabled. Known actions are approved when disabled.
         """
         self._evaluation_count += 1
         evaluation_time = now or datetime.now(timezone.utc)
         if evaluation_time.tzinfo is None or evaluation_time.utcoffset() is None:
             raise ValueError("policy evaluation now must be timezone-aware")
+
+        if spec.action not in KNOWN_ACTIONS:
+            reason = (
+                f"Unknown policy action category: {spec.action or '<empty>'}; "
+                "action denied."
+            )
+            self._deny_count += 1
+            trace = PolicyDecisionTrace(
+                action=spec.action,
+                decision=PolicyDecision.DENY.value,
+                engine_enabled=self._enabled,
+                summary=reason,
+            )
+            return PolicyResult(
+                decision=PolicyDecision.DENY,
+                evidence=(reason,),
+                trace=trace,
+            )
 
         if not self._enabled:
             trace = PolicyDecisionTrace.disabled(spec.action)
@@ -298,6 +480,8 @@ class PolicyEngine:
                 decision=PolicyDecision.APPROVE,
                 evidence=("policy_engine_disabled",),
                 trace=trace,
+                policy_digest=self.policy_digest,
+                action_digest=spec.action_digest,
             )
 
         violated: list[PolicyRule] = []
@@ -435,6 +619,8 @@ class PolicyEngine:
                         trace=trace,
                         all_results=tuple(all_results),
                         evidence=tuple(evidence),
+                        policy_digest=self.policy_digest,
+                        action_digest=spec.action_digest,
                     )
 
                 effect = "record"
@@ -453,7 +639,9 @@ class PolicyEngine:
 
         # Determine aggregate decision
         escalated_rules = tuple(
-            r for r in violated if r.decision in (PolicyDecision.ESCALATE, PolicyDecision.DENY)
+            r
+            for r in violated
+            if r.decision in (PolicyDecision.ESCALATE, PolicyDecision.DENY)
             and r.severity == Severity.HIGH
         )
 
@@ -479,12 +667,15 @@ class PolicyEngine:
                 all_results=tuple(all_results),
                 evidence=tuple(evidence),
                 trace=trace,
+                policy_digest=self.policy_digest,
+                action_digest=spec.action_digest,
             )
 
         # Check if any non-BLOCKER DENY rules matched (MEDIUM severity)
         deny_rules = tuple(
-            r for r in violated if r.decision == PolicyDecision.DENY
-            and r.severity != Severity.BLOCKER
+            r
+            for r in violated
+            if r.decision == PolicyDecision.DENY and r.severity != Severity.BLOCKER
         )
         if deny_rules:
             # MEDIUM deny rules are treated as escalations
@@ -510,6 +701,8 @@ class PolicyEngine:
                 all_results=tuple(all_results),
                 evidence=tuple(evidence),
                 trace=trace,
+                policy_digest=self.policy_digest,
+                action_digest=spec.action_digest,
             )
 
         # Only MEDIUM/LOW or no matches → APPROVE
@@ -532,6 +725,8 @@ class PolicyEngine:
             all_results=tuple(all_results),
             evidence=tuple(evidence),
             trace=trace,
+            policy_digest=self.policy_digest,
+            action_digest=spec.action_digest,
         )
 
     def evaluate_sync(self, spec: ActionSpec) -> PolicyResult:
@@ -542,3 +737,237 @@ class PolicyEngine:
         ``await``.
         """
         return self.evaluate(spec)
+
+    # ── Approved execution binding & verification ─────────────────────────
+
+    def verify_approved_execution(
+        self,
+        approval: PolicyApproval,
+        spec: ActionSpec | None = None,
+        *,
+        action: str | None = None,
+        params: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        raise_on_mismatch: bool = True,
+    ) -> bool:
+        """Verify that an approved action execution matches exact canonical action and policy digests.
+
+        Rejects execution when:
+        1. Approval status is not 'approved'
+        2. Action name or parameters changed after review (action digest mismatch)
+        3. Policy engine rules or state changed after review (policy digest mismatch)
+        """
+        if spec is None:
+            spec = ActionSpec(
+                action=action or approval.action,
+                params=params if params is not None else approval.params,
+                context=context if context is not None else approval.context,
+            )
+
+        # 1. Verify approval status
+        if approval.status != "approved":
+            if raise_on_mismatch:
+                raise ApprovalStatusError(
+                    approval_id=approval.approval_id,
+                    status=approval.status,
+                )
+            return False
+
+        # 2. Verify canonical action identity
+        if spec.action_digest != approval.action_digest:
+            if raise_on_mismatch:
+                raise ActionDigestMismatchError(
+                    expected_digest=approval.action_digest,
+                    actual_digest=spec.action_digest,
+                    action=spec.action,
+                )
+            return False
+
+        # 3. Verify exact policy engine digest
+        current_policy_digest = self.policy_digest
+        if approval.policy_digest != current_policy_digest:
+            if raise_on_mismatch:
+                raise PolicyDigestMismatchError(
+                    expected_digest=approval.policy_digest,
+                    actual_digest=current_policy_digest,
+                    action=spec.action,
+                )
+            return False
+
+        return True
+
+    def evaluate_approved(
+        self,
+        approval: PolicyApproval,
+        spec: ActionSpec | None = None,
+        *,
+        action: str | None = None,
+        params: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> PolicyResult:
+        """Evaluate execution of an approved action, returning PolicyResult.
+
+        If verification fails due to action change, param change, policy change after review,
+        or invalid approval status, returns PolicyResult with PolicyDecision.DENY and full evidence / trace.
+        If verification succeeds, returns PolicyResult with PolicyDecision.APPROVE.
+        """
+        if spec is None:
+            spec = ActionSpec(
+                action=action or approval.action,
+                params=params if params is not None else approval.params,
+                context=context if context is not None else approval.context,
+            )
+
+        evidence: list[str] = []
+        steps: list[RuleTraceStep] = []
+
+        # Check approval status
+        if approval.status != "approved":
+            evidence.append(
+                f"approval_status_invalid: status is '{approval.status}', expected 'approved'"
+            )
+            step = RuleTraceStep(
+                policy="approval-binding",
+                rule_id="approval-status",
+                severity="blocker",
+                matched=True,
+                decision="deny",
+                reason=f"Approval status is '{approval.status}' (expected 'approved')",
+                conditions=(),
+                effect="short_circuit_deny",
+            )
+            steps.append(step)
+            trace = PolicyDecisionTrace(
+                action=spec.action,
+                decision=PolicyDecision.DENY.value,
+                engine_enabled=self._enabled,
+                short_circuited=True,
+                steps=tuple(steps),
+                summary=f"DENIED: approval '{approval.approval_id}' has status '{approval.status}'.",
+            )
+            dummy_rule = PolicyRule(
+                rule_id="approval-status-invalid",
+                description="Approval status must be approved",
+                decision=PolicyDecision.DENY,
+                severity=Severity.BLOCKER,
+                reason=f"Approval status is '{approval.status}' (expected 'approved')",
+            )
+            return PolicyResult.denied(
+                dummy_rule,
+                trace=trace,
+                evidence=tuple(evidence),
+                policy_digest=self.policy_digest,
+                action_digest=spec.action_digest,
+            )
+
+        # Check action digest
+        if spec.action_digest != approval.action_digest:
+            evidence.append(
+                f"action_digest_mismatch: approved action digest '{approval.action_digest}', "
+                f"execution action digest '{spec.action_digest}'. Action or parameters changed after review."
+            )
+            step = RuleTraceStep(
+                policy="approval-binding",
+                rule_id="action-digest-binding",
+                severity="blocker",
+                matched=True,
+                decision="deny",
+                reason="Action or parameters changed after review",
+                conditions=(),
+                effect="short_circuit_deny",
+            )
+            steps.append(step)
+            trace = PolicyDecisionTrace(
+                action=spec.action,
+                decision=PolicyDecision.DENY.value,
+                engine_enabled=self._enabled,
+                short_circuited=True,
+                steps=tuple(steps),
+                summary="DENIED: action or parameters changed after review.",
+            )
+            dummy_rule = PolicyRule(
+                rule_id="action-digest-mismatch",
+                description="Action and parameters must match reviewed approval",
+                decision=PolicyDecision.DENY,
+                severity=Severity.BLOCKER,
+                reason="Action or parameters changed after review",
+            )
+            return PolicyResult.denied(
+                dummy_rule,
+                trace=trace,
+                evidence=tuple(evidence),
+                policy_digest=self.policy_digest,
+                action_digest=spec.action_digest,
+            )
+
+        # Check policy digest
+        current_policy_digest = self.policy_digest
+        if approval.policy_digest != current_policy_digest:
+            evidence.append(
+                f"policy_digest_mismatch: approved under policy digest '{approval.policy_digest}', "
+                f"current engine digest '{current_policy_digest}'. Policies changed after review."
+            )
+            step = RuleTraceStep(
+                policy="approval-binding",
+                rule_id="policy-digest-binding",
+                severity="blocker",
+                matched=True,
+                decision="deny",
+                reason="Policy rules changed after review",
+                conditions=(),
+                effect="short_circuit_deny",
+            )
+            steps.append(step)
+            trace = PolicyDecisionTrace(
+                action=spec.action,
+                decision=PolicyDecision.DENY.value,
+                engine_enabled=self._enabled,
+                short_circuited=True,
+                steps=tuple(steps),
+                summary="DENIED: policy rules changed after review.",
+            )
+            dummy_rule = PolicyRule(
+                rule_id="policy-digest-mismatch",
+                description="Policy rules must match simulated review digest",
+                decision=PolicyDecision.DENY,
+                severity=Severity.BLOCKER,
+                reason="Policies changed after review",
+            )
+            return PolicyResult.denied(
+                dummy_rule,
+                trace=trace,
+                evidence=tuple(evidence),
+                policy_digest=current_policy_digest,
+                action_digest=spec.action_digest,
+            )
+
+        # Verified successfully
+        step = RuleTraceStep(
+            policy="approval-binding",
+            rule_id="binding-verified",
+            severity="low",
+            matched=False,
+            decision="approve",
+            reason="Approved execution bound to simulated digest verified",
+            conditions=(),
+            effect="approve",
+        )
+        steps.append(step)
+        trace = PolicyDecisionTrace(
+            action=spec.action,
+            decision=PolicyDecision.APPROVE.value,
+            engine_enabled=self._enabled,
+            short_circuited=False,
+            steps=tuple(steps),
+            summary=f"APPROVE: verified execution for approval '{approval.approval_id}'.",
+        )
+        return PolicyResult.approved(
+            trace=trace,
+            evidence=(
+                f"Approved execution verified (approval_id='{approval.approval_id}', "
+                f"action_digest='{spec.action_digest[:16]}...', "
+                f"policy_digest='{current_policy_digest[:16]}...')",
+            ),
+            policy_digest=current_policy_digest,
+            action_digest=spec.action_digest,
+        )

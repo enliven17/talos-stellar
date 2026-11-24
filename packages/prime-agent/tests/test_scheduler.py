@@ -12,10 +12,12 @@ import pytest
 
 from talos_agent.config import Settings
 from talos_agent.scheduler import (
+    MIN_RECURRING_TASK_INTERVAL_SECONDS,
     check_should_run,
     plan_interval_runs,
     run_dividend_distribution,
     run_loan_repayment,
+    validate_recurring_task_interval,
 )
 from talos_agent.scheduler import runner as scheduler_runner
 from talos_agent.scheduler import tasks as scheduler_tasks
@@ -31,6 +33,17 @@ class FixedClock:
 
 
 # ── Scheduler core tests ───────────────────────────────────────────────────────
+
+def test_recurring_interval_rejects_values_below_supported_minimum():
+    with pytest.raises(ValueError, match="at least 1 seconds"):
+        validate_recurring_task_interval("dividend_distribution", 0.5)
+
+
+def test_recurring_interval_accepts_supported_boundary():
+    validate_recurring_task_interval(
+        "dividend_distribution",
+        MIN_RECURRING_TASK_INTERVAL_SECONDS,
+    )─
 
 def test_check_should_run_uses_clock_and_utc_boundaries():
     clock = FixedClock(datetime(2024, 1, 2, 6, 0, 0, tzinfo=timezone.utc))
@@ -63,8 +76,13 @@ def test_check_should_run_respects_configured_timezone_boundary():
 
 
 def test_check_should_run_handles_dst_gap_and_overlap():
-    gap_now = datetime(2024, 3, 10, 3, 30, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
-    overlap_now = datetime(2024, 11, 3, 1, 30, 0, tzinfo=ZoneInfo("America/New_York"))
+    try:
+        la_tz = ZoneInfo("America/Los_Angeles")
+        ny_tz = ZoneInfo("America/New_York")
+    except Exception:
+        pytest.skip("tzdata not available on this platform")
+    gap_now = datetime(2024, 3, 10, 3, 30, 0, tzinfo=la_tz)
+    overlap_now = datetime(2024, 11, 3, 1, 30, 0, tzinfo=ny_tz)
 
     assert check_should_run(
         now=gap_now,

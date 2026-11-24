@@ -6,7 +6,7 @@
  */
 export { startReconciler, stopReconciler, runOneTick, registerTx, getStats, isRunning } from "./scheduler";
 export { reconcilerConfig, loadReconcilerConfig } from "./config";
-export { pollTransaction, fetchCurrentLedger } from "./horizon";
+export { pollTransaction, fetchCurrentLedger, extractObservationSource } from "./horizon";
 export { applyRepair } from "./repair";
 export {
   buildPaymentRepairPlan,
@@ -27,14 +27,21 @@ export {
   isTerminal,
   isWallClockExpired,
   isLedgerExpired,
-  normalizeNetworkPassphrase,
-  isMatchingNetwork,
+  normalizePaymentIdentity,
+  detectAssociationConflict,
+  hasConflictingAssociation,
+  canCreditJob,
+  formatAssociationConflictError,
+  TxAssociationConflictError,
 } from "./state-machine";
 export type {
   FinalityStatus,
   TxSourceType,
   TxRecord,
   TxRecordUpdate,
+  TxAssociation,
+  TxAssociationConflict,
+  JobCreditDecision,
   HorizonPollResult,
   RepairOutcome,
   ReconcilerConfig,
@@ -51,4 +58,3 @@ export type {
   RepairPlanExecutionItemResult,
   RepairPlanExecutionResult,
 } from "./types";
-export { ACTIVE_STATES, TERMINAL_STATES } from "./types";

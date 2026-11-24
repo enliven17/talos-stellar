@@ -71,7 +71,10 @@ and audits:
 
 The endpoint returns each obligation's status (`satisfied`, `blocking`, `count`) and permitted
 next actions with enablement flags and blocking obligation references. Private financial details
-(secrets, seeds, or unredacted transactions) are strictly preserved and never exposed.
+(secrets, seeds, or unredacted transactions) are strictly preserved and never exposed. Owner-only
+financial exports use `GET /api/talos/:id/financial-statement` with a fresh wallet-ownership proof
+bound to the `financial-statement` resource; the resulting JSON/CSV attachment contains exact
+amounts, statuses, and observation bounds, and excludes private credentials and internal notes.
 
 `GET /api/talos/:id/lifecycle` also embeds this evaluation as `checklist` for authenticated viewers.
 

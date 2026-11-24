@@ -87,7 +87,11 @@ class StubRegistry:
         return len(self._queues.get(tool_name, [])) - self._call_counts[tool_name]
 
     def all_remaining(self) -> dict[str, int]:
-        return {name: self.remaining(name) for name in self._queues if self.remaining(name) > 0}
+        return {
+            name: self.remaining(name)
+            for name in self._queues
+            if self.remaining(name) > 0
+        }
 
     @property
     def registered_tools(self) -> list[str]:

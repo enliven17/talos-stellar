@@ -11,6 +11,23 @@ permissions:
   contents: read
 
 jobs:
+
+  compatibility-manifest:
+    name: "check · compatibility manifest"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Verify compatibility manifest
+        run: node scripts/check-compatibility-manifest.mjs
+
+      - name: Test compatibility manifest checker
+        run: node --test scripts/check-compatibility-manifest.test.mjs
   # ─────────────────────────────────────────────────────────────────
   # Job 1: Detect which packages were affected by changed files.
   # Outputs a JSON matrix consumed by the downstream job.
@@ -30,6 +47,14 @@ jobs:
 
       - name: Test testnet bootstrap script
         run: node --test scripts/testnet-bootstrap.test.mjs
+
+      # ── Guard: tracked paths must be checkable on case-insensitive
+      #    filesystems (Windows, default macOS) before a checkout is used.
+      - name: Test tracked-path collision check
+        run: node --test scripts/check-tracked-path-collisions.test.mjs
+
+      - name: Check tracked paths for case collisions
+        run: node scripts/check-tracked-path-collisions.mjs
 
       # ── Guard: run the detector's own test suite before it gates CI.
       #    A broken detector must never silently skip package checks.
@@ -258,6 +283,12 @@ jobs:
         if: matrix.package == 'sdk'
         working-directory: packages/sdk
         run: pnpm run test
+
+      - name: "[sdk] Verify published entry points"
+        if: matrix.package == 'sdk'
+        run: |
+          node --test scripts/check-package-artifacts.test.mjs
+          node scripts/check-package-artifacts.mjs --package packages/sdk
 
       # ── Prime Agent: ruff, pytest ───────────────────────────────
       - name: "[prime-agent] Lint"

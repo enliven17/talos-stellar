@@ -1206,6 +1206,13 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         schema: { type: "string", enum: ["asc", "desc"], default: "desc" },
         description: "Sort direction (`asc` or `desc`). Defaults to `desc`.",
       },
+      talosAddressParam: {
+        name: "address",
+        in: "query",
+        required: false,
+        schema: { type: "string", minLength: 1, maxLength: 64 },
+        description: "Exact-case Stellar address. Matches the agent wallet, creator, investor, or treasury address.",
+      },
       minScoreParam: {
         name: "minScore",
         in: "query",
@@ -1333,6 +1340,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         parameters: [
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/talosAddressParam" },
           { $ref: "#/components/parameters/minScoreParam" },
           { $ref: "#/components/parameters/minConfidenceParam" },
           { $ref: "#/components/parameters/allowColdStartParam" },
@@ -2654,6 +2662,7 @@ Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`d
           { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+
           { $ref: "#/components/parameters/minScoreParam" },
           { $ref: "#/components/parameters/minConfidenceParam" },
           { $ref: "#/components/parameters/allowColdStartParam" },
@@ -3250,7 +3259,12 @@ Verifies and settles the payment on-chain, then records the purchase and revenue
                       properties: {
                         totalValue: { type: "string" },
                         activeTalos: { type: "integer" },
-                        totalRevenue: { type: "string" },
+                        totalRevenue: {
+                          type: "string",
+                          nullable: true,
+                          description:
+                            "Formatted sum of observed revenue. `null` when no revenue observation exists; `\"$0.00\"` is a verified zero.",
+                        },
                         pendingCount: { type: "integer" },
                       },
                     },
@@ -3258,7 +3272,22 @@ Verifies and settles the payment on-chain, then records the purchase and revenue
                     approvalHistory: { type: "array", items: { type: "object", additionalProperties: true } },
                     activities: { type: "array", items: { type: "object", additionalProperties: true } },
                     agents: { type: "array", items: { type: "object", additionalProperties: true } },
-                    revenueStreams: { type: "array", items: { type: "object", additionalProperties: true } },
+                    revenueStreams: {
+                      type: "array",
+                      description:
+                        "One entry per agent with at least one revenue observation. Agents without observations are omitted rather than reported as $0.",
+                      items: {
+                        type: "object",
+                        properties: {
+                          talosId: { type: "string" },
+                          talosName: { type: "string" },
+                          totalRevenue: { type: "number", nullable: true },
+                          observationCount: { type: "integer" },
+                          bySource: { type: "object", additionalProperties: { type: "number" } },
+                          recentTx: { type: "array", items: { type: "object", additionalProperties: true } },
+                        },
+                      },
+                    },
                     talosManagement: { type: "array", items: { type: "object", additionalProperties: true } },
                   },
                 },

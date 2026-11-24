@@ -15,17 +15,49 @@
  *   CONFIRMING → CONFIRMED   (currentLedger ≥ confirmedLedger + confirmationDepth)
  *   CONFIRMING → FAILED      (should not happen after first-seen, but defensively allowed)
  *   CONFIRMING → EXPIRED     (confirmation window elapsed without reaching depth)
- *   Any active → EXPIRED     (wall-clock expiresAt exceeded)
+ *   Any active → EXPIRED     (wall-clock expiresAt exceeded; invalid timestamps leave state unchanged)
  */
 
 import type {
   FinalityStatus,
   TxRecord,
   TxRecordUpdate,
+  TxAssociation,
+  TxAssociationConflict,
+  JobCreditDecision,
   HorizonPollResult,
   ReconcilerConfig,
+  FinalityEvidence,
 } from "./types";
 import { TERMINAL_STATES } from "./types";
+import { isTrustedObservation } from "./horizon";
+
+// ─── Evidence Builder ─────────────────────────────────────────────────────────
+
+/**
+ * Construct a standardized FinalityEvidence object for a state transition.
+ */
+export function buildFinalityEvidence(params: {
+  record: TxRecord;
+  fromStatus: FinalityStatus;
+  toStatus: FinalityStatus;
+  ledger: number | null;
+  observationSource: string;
+  transitionReason: string;
+  now?: Date;
+  metadata?: Record<string, unknown>;
+}): FinalityEvidence {
+  return {
+    txHash: params.record.txHash,
+    ledger: params.ledger,
+    observationSource: params.observationSource,
+    transitionReason: params.transitionReason,
+    fromStatus: params.fromStatus,
+    toStatus: params.toStatus,
+    decidedAt: params.now ?? new Date(),
+    metadata: params.metadata,
+  };
+}
 
 // ─── Guard ───────────────────────────────────────────────────────────────────
 
@@ -70,11 +102,24 @@ export function isTerminal(record: TxRecord): boolean {
 
 /**
  * Returns true if the record should transition to EXPIRED based on wall-clock
- * time (expiresAt column) regardless of ledger position.
+ * time (expiresAt column) regardless of ledger position. Invalid dates are not
+ * considered expired; transitions reject them without updating the record.
  */
 export function isWallClockExpired(record: TxRecord, now: Date = new Date()): boolean {
   if (!record.expiresAt) return false;
+  if (!isValidDate(record.expiresAt) || !isValidDate(now)) return false;
   return now >= record.expiresAt;
+}
+
+function isValidDate(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+function hasValidExpiryTimestamps(record: TxRecord, now: Date): boolean {
+  return (
+    isValidDate(now) &&
+    (record.expiresAt == null || isValidDate(record.expiresAt))
+  );
 }
 
 /**
@@ -104,26 +149,53 @@ export function transitionFromPending(
   now: Date = new Date(),
 ): TxRecordUpdate | null {
   if (record.finalityStatus !== "PENDING") return null;
+  if (!hasValidExpiryTimestamps(record, now)) return null;
 
   // Wall-clock expiry takes precedence over all other checks
   if (isWallClockExpired(record, now)) {
+    const reason = "Wall-clock expiry exceeded";
+    const source = "wall_clock";
     return {
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
-      lastError: "Wall-clock expiry exceeded",
+      lastError: reason,
       pollCount: record.pollCount + 1,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "PENDING",
+        toStatus: "EXPIRED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+      }),
     };
   }
 
   // Ledger gap expiry
   if (isLedgerExpired(record, currentLedger, config.maxLedgerGap)) {
+    const reason = `Ledger gap exceeded: current=${currentLedger}, submitted=${record.ledgerSubmitted}, max=${config.maxLedgerGap}`;
+    const source = "ledger_gap";
     return {
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
-      lastError: `Ledger gap exceeded: current=${currentLedger}, submitted=${record.ledgerSubmitted}, max=${config.maxLedgerGap}`,
+      lastError: reason,
       pollCount: record.pollCount + 1,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "PENDING",
+        toStatus: "EXPIRED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+      }),
     };
   }
 
@@ -143,7 +215,9 @@ export function transitionFromPending(
   }
 
   switch (pollResult.outcome) {
-    case "confirmed":
+    case "confirmed": {
+      const reason = "Transaction confirmed on-chain in closed ledger";
+      const source = pollResult.source ?? "horizon";
       return {
         finalityStatus: "CONFIRMING",
         lastLedgerChecked: currentLedger,
@@ -151,27 +225,68 @@ export function transitionFromPending(
         lastError: null,
         pollCount: record.pollCount + 1,
         updatedAt: now,
+        observationSource: source,
+        transitionReason: reason,
+        evidence: buildFinalityEvidence({
+          record,
+          fromStatus: "PENDING",
+          toStatus: "CONFIRMING",
+          ledger: pollResult.ledger,
+          observationSource: source,
+          transitionReason: reason,
+          now,
+        }),
       };
+    }
 
-    case "failed":
+    case "failed": {
+      const reason = pollResult.detail ?? "Transaction unsuccessful on-chain";
+      const source = pollResult.source ?? "horizon";
       return {
         finalityStatus: "FAILED",
         lastLedgerChecked: currentLedger,
         confirmedLedger: pollResult.ledger,
-        lastError: pollResult.detail ?? "Transaction unsuccessful on-chain",
+        lastError: reason,
         pollCount: record.pollCount + 1,
         updatedAt: now,
+        observationSource: source,
+        transitionReason: reason,
+        evidence: buildFinalityEvidence({
+          record,
+          fromStatus: "PENDING",
+          toStatus: "FAILED",
+          ledger: pollResult.ledger,
+          observationSource: source,
+          transitionReason: reason,
+          now,
+          metadata: pollResult.detail ? { resultCode: pollResult.detail } : undefined,
+        }),
       };
+    }
 
     case "not_found": {
       const newPollCount = record.pollCount + 1;
       if (newPollCount >= config.notFoundThreshold) {
+        const reason = `NOT_FOUND after ${newPollCount} polls`;
+        const source = pollResult.source ?? "horizon";
         return {
           finalityStatus: "NOT_FOUND",
           lastLedgerChecked: currentLedger,
-          lastError: `NOT_FOUND after ${newPollCount} polls`,
+          lastError: reason,
           pollCount: newPollCount,
           updatedAt: now,
+          observationSource: source,
+          transitionReason: reason,
+          evidence: buildFinalityEvidence({
+            record,
+            fromStatus: "PENDING",
+            toStatus: "NOT_FOUND",
+            ledger: currentLedger,
+            observationSource: source,
+            transitionReason: reason,
+            now,
+            metadata: { pollCount: newPollCount, threshold: config.notFoundThreshold },
+          }),
         };
       }
       return {
@@ -186,6 +301,7 @@ export function transitionFromPending(
       return {
         lastLedgerChecked: currentLedger,
         lastError: pollResult.message,
+        reasonCode: pollResult.reasonCode,
         pollCount: record.pollCount + 1,
         updatedAt: now,
       };
@@ -207,14 +323,28 @@ export function transitionFromConfirming(
   pollResult?: HorizonPollResult | null,
 ): TxRecordUpdate | null {
   if (record.finalityStatus !== "CONFIRMING") return null;
+  if (!hasValidExpiryTimestamps(record, now)) return null;
 
   // Wall-clock expiry
   if (isWallClockExpired(record, now)) {
+    const reason = "Confirmation window expired (wall-clock)";
+    const source = "wall_clock";
     return {
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
-      lastError: "Confirmation window expired (wall-clock)",
+      lastError: reason,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "CONFIRMING",
+        toStatus: "EXPIRED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+      }),
     };
   }
 
@@ -238,11 +368,24 @@ export function transitionFromConfirming(
     record.ledgerSubmitted &&
     isLedgerExpired(record, currentLedger, config.maxLedgerGap)
   ) {
+    const reason = `Confirmation ledger gap exceeded: current=${currentLedger}`;
+    const source = "ledger_gap";
     return {
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
-      lastError: `Confirmation ledger gap exceeded: current=${currentLedger}`,
+      lastError: reason,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "CONFIRMING",
+        toStatus: "EXPIRED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+      }),
     };
   }
 
@@ -252,11 +395,28 @@ export function transitionFromConfirming(
     record.confirmedLedger !== undefined &&
     currentLedger >= record.confirmedLedger + config.confirmationDepth
   ) {
+    const reason = `Confirmation depth reached: current=${currentLedger}, confirmed=${record.confirmedLedger}, depth=${config.confirmationDepth}`;
+    const source = "horizon";
     return {
       finalityStatus: "CONFIRMED",
       lastLedgerChecked: currentLedger,
       lastError: null,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "CONFIRMING",
+        toStatus: "CONFIRMED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+        metadata: {
+          confirmedLedger: record.confirmedLedger,
+          confirmationDepth: config.confirmationDepth,
+        },
+      }),
     };
   }
 
@@ -340,4 +500,135 @@ export function validateTransition(
     return `Illegal transition: "${from}" → "${to}"`;
   }
   return null;
+}
+
+// ─── Observation Age and Staleness ────────────────────────────────────────────
+
+/**
+ * Compute the age of the last trusted payment observation in ledgers.
+ *
+ * Age is defined as (currentLedger - observedLedger).
+ *
+ * Key invariants:
+ * - Distinguishes unknown age (null) from zero age (0).
+ * - Zero age (0): the payment was observed in the current closed ledger.
+ * - Unknown age (null): no trusted observation exists (e.g. pending record before
+ *   Horizon inclusion, not_found, transient error, or missing current ledger).
+ * - Future/nonmonotonic anomaly (null): currentLedger < observedLedger is treated
+ *   as an untrusted anomaly and returns null rather than a negative age.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
+ */
+export function getObservationAge(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger?: number | null,
+): number | null {
+  if (recordOrPoll === null || recordOrPoll === undefined) {
+    return null;
+  }
+  if (currentLedger === null || currentLedger === undefined) {
+    return null;
+  }
+  if (!Number.isFinite(currentLedger) || currentLedger <= 0) {
+    return null;
+  }
+
+  let observedLedger: number | null = null;
+  if ("finalityStatus" in recordOrPoll) {
+    observedLedger = recordOrPoll.confirmedLedger ?? null;
+  } else if ("outcome" in recordOrPoll) {
+    if (isTrustedObservation(recordOrPoll)) {
+      observedLedger = recordOrPoll.ledger;
+    }
+  }
+
+  if (observedLedger === null || observedLedger === undefined) {
+    return null;
+  }
+  if (!Number.isFinite(observedLedger) || observedLedger <= 0) {
+    return null;
+  }
+
+  const age = currentLedger - observedLedger;
+  if (age < 0) {
+    return null;
+  }
+  return age;
+}
+
+/**
+ * Check whether the last trusted payment observation is stale.
+ *
+ * An observation is stale when its age is known and strictly exceeds the
+ * threshold. If age is unknown (null), returns false.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
+ * @param threshold Maximum age in ledgers before observation is stale.
+ */
+export function isObservationStale(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger: number | null | undefined,
+  threshold: number,
+): boolean {
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    return false;
+  }
+  const age = getObservationAge(recordOrPoll, currentLedger);
+  if (age === null) {
+    return false;
+  }
+  return age > threshold;
+}
+
+/**
+ * Returns a complete descriptor of the payment observation, including its
+ * ledger, age, and staleness status.
+ *
+ * Invariant: keeps stale observation status visible (status: "stale", isStale: true)
+ * without altering or mutating terminal records.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
+ * @param threshold Maximum age in ledgers before observation is stale (default: 120).
+ */
+export function getPaymentObservation(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger: number | null | undefined,
+  threshold: number = 120,
+): PaymentObservation {
+  if (!recordOrPoll) {
+    return {
+      ledger: null,
+      age: null,
+      status: "unknown",
+      isStale: false,
+    };
+  }
+
+  const age = getObservationAge(recordOrPoll, currentLedger);
+  const ledger =
+    "finalityStatus" in recordOrPoll
+      ? recordOrPoll.confirmedLedger ?? null
+      : isTrustedObservation(recordOrPoll)
+      ? recordOrPoll.ledger
+      : null;
+
+  if (age === null) {
+    return {
+      ledger,
+      age: null,
+      status: "unknown",
+      isStale: false,
+    };
+  }
+
+  const isStale = age > threshold;
+  return {
+    ledger,
+    age,
+    status: isStale ? "stale" : "fresh",
+    isStale,
+  };
 }

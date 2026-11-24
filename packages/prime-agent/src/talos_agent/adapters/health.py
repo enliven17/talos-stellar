@@ -72,7 +72,9 @@ _SENSITIVE_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9\-_]{20,}"),  # OpenAI/API secret key
     re.compile(r"(https?://[^\s:@]+:[^\s:@]+@\S+)"),  # URL with basic auth creds
     re.compile(r"(Bearer\s+)[A-Za-z0-9\-_.~+/]+=*", re.IGNORECASE),
-    re.compile(r"([a-zA-Z0-9_\-]{24,}\.[a-zA-Z0-9_\-]{6}\.[a-zA-Z0-9_\-]{27,})"),  # Discord bot token
+    re.compile(
+        r"([a-zA-Z0-9_\-]{24,}\.[a-zA-Z0-9_\-]{6}\.[a-zA-Z0-9_\-]{27,})"
+    ),  # Discord bot token
 ]
 
 
@@ -141,7 +143,9 @@ class ProbeResult:
         )
         return {
             "adapter": self.adapter,
-            "state": self.state.value if isinstance(self.state, enum.Enum) else str(self.state),
+            "state": self.state.value
+            if isinstance(self.state, enum.Enum)
+            else str(self.state),
             "detail": _sanitize_health_detail(self.detail),
             "error_category": cat,
             "checked_at": self.checked_at.isoformat(),
@@ -246,9 +250,13 @@ class DiscordProbe:
         a = self._adapter
         adapter_name = getattr(a, "channel_name", "Discord")
         snapshot = _call_health_snapshot(a)
-        has_webhook = _snapshot_bool(snapshot, "has_webhook", getattr(a, "_webhook_url", ""))
+        has_webhook = _snapshot_bool(
+            snapshot, "has_webhook", getattr(a, "_webhook_url", "")
+        )
         has_token = _snapshot_bool(snapshot, "has_token", getattr(a, "_bot_token", ""))
-        has_channel = _snapshot_bool(snapshot, "has_channel", getattr(a, "_channel_id", ""))
+        has_channel = _snapshot_bool(
+            snapshot, "has_channel", getattr(a, "_channel_id", "")
+        )
 
         if has_webhook or (has_token and has_channel):
             return ProbeResult(
@@ -338,8 +346,7 @@ class TelegramProbe:
             adapter=adapter_name,
             state=AdapterState.DISABLED,
             detail=(
-                "No credentials found. "
-                "Set telegram_bot_token and telegram_chat_id."
+                "No credentials found. Set telegram_bot_token and telegram_chat_id."
             ),
             error_category=ErrorCategory.NONE,
         )
@@ -364,7 +371,9 @@ class XProbe:
         adapter_name = getattr(a, "channel_name", "X")
         snapshot = _call_health_snapshot(a)
         settings = getattr(a, "_settings", None)
-        has_username = _snapshot_bool(snapshot, "has_username", getattr(settings, "x_username", ""))
+        has_username = _snapshot_bool(
+            snapshot, "has_username", getattr(settings, "x_username", "")
+        )
 
         from talos_agent.config import resolve_setting_secret
 
@@ -374,7 +383,9 @@ class XProbe:
         has_creds = has_username and has_password
 
         browser: object | None = getattr(a, "_browser", None)
-        browser_live = _snapshot_bool(snapshot, "browser_live", _browser_is_live(browser))
+        browser_live = _snapshot_bool(
+            snapshot, "browser_live", _browser_is_live(browser)
+        )
 
         if not has_creds:
             return ProbeResult(
@@ -496,8 +507,12 @@ class StellarPaymentProbe:
 
         snapshot = _call_health_snapshot(s)
 
-        has_api = _snapshot_bool(snapshot, "has_api", getattr(s, "_api", None) is not None)
-        initialized = _snapshot_bool(snapshot, "initialized", getattr(s, "_initialized", False))
+        has_api = _snapshot_bool(
+            snapshot, "has_api", getattr(s, "_api", None) is not None
+        )
+        initialized = _snapshot_bool(
+            snapshot, "initialized", getattr(s, "_initialized", False)
+        )
 
         if not has_api:
             return ProbeResult(
@@ -546,8 +561,12 @@ class X402PaymentProbe:
 
         snapshot = _call_health_snapshot(s)
 
-        has_api = _snapshot_bool(snapshot, "has_api", getattr(s, "_api", None) is not None)
-        initialized = _snapshot_bool(snapshot, "initialized", getattr(s, "_initialized", False))
+        has_api = _snapshot_bool(
+            snapshot, "has_api", getattr(s, "_api", None) is not None
+        )
+        initialized = _snapshot_bool(
+            snapshot, "initialized", getattr(s, "_initialized", False)
+        )
         has_wallet = _snapshot_bool(
             snapshot, "has_wallet", bool(getattr(s, "_wallet_address", None))
         )
@@ -603,7 +622,9 @@ class HealthReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "overall": self.overall.value if isinstance(self.overall, enum.Enum) else str(self.overall),
+            "overall": self.overall.value
+            if isinstance(self.overall, enum.Enum)
+            else str(self.overall),
             "adapters": [r.to_dict() for r in self.adapters],
             "checked_at": self.checked_at.isoformat(),
         }
@@ -669,7 +690,9 @@ async def _safe_probe_coro(
         return ProbeResult(
             adapter=adapter_n,
             state=AdapterState.DEGRADED,
-            detail=_sanitize_health_detail(f"Probe raised an unexpected error: {err_type}"),
+            detail=_sanitize_health_detail(
+                f"Probe raised an unexpected error: {err_type}"
+            ),
             error_category=ErrorCategory.INTERNAL_ERROR,
         )
 
@@ -772,8 +795,7 @@ class AdapterHealthReporter:
         results: list[ProbeResult] = []
         if probes:
             coros = [
-                _safe_probe_coro(probe, self._timeout, name)
-                for name, probe in probes
+                _safe_probe_coro(probe, self._timeout, name) for name, probe in probes
             ]
             raw = await asyncio.gather(*coros, return_exceptions=True)
             for (name, _), outcome in zip(probes, raw):

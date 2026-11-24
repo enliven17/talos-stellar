@@ -83,7 +83,9 @@ def _get_tool_timeout(settings: Settings) -> float:
     Invalid or missing values fall back to the safe default, and the timeout
     never exceeds the safe upper bound.
     """
-    raw_timeout = getattr(settings, "tool_timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS)
+    raw_timeout = getattr(
+        settings, "tool_timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS
+    )
     try:
         timeout = float(raw_timeout)
     except (TypeError, ValueError):
@@ -178,12 +180,22 @@ async def agent_loop(
     """
     if settings.model_routing_enabled:
         return await _routed_agent_loop(
-            settings, tools, talos_config, context,
-            system_prompt_override, shutdown_event, db,
+            settings,
+            tools,
+            talos_config,
+            context,
+            system_prompt_override,
+            shutdown_event,
+            db,
         )
     return await _legacy_agent_loop(
-        settings, tools, talos_config, context,
-        system_prompt_override, shutdown_event, db,
+        settings,
+        tools,
+        talos_config,
+        context,
+        system_prompt_override,
+        shutdown_event,
+        db,
     )
 
 
@@ -202,12 +214,17 @@ async def _legacy_agent_loop(
     """Original agent loop — Groq preferred, OpenAI fallback."""
     client = get_openai_client(settings.llm_api_key, settings.llm_base_url)
 
-    system_prompt = system_prompt_override or build_system_prompt(talos_config, context, settings)
+    system_prompt = system_prompt_override or build_system_prompt(
+        talos_config, context, settings
+    )
     tool_schemas = tools.openai_schemas()
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Decide and execute your next actions based on the current context."},
+        {
+            "role": "user",
+            "content": "Decide and execute your next actions based on the current context.",
+        },
     ]
 
     # ── Cycle-summary bookkeeping ─────────────────────────
@@ -223,7 +240,9 @@ async def _legacy_agent_loop(
     try:
         for iteration in range(settings.max_iterations):
             if shutdown_event and shutdown_event.is_set():
-                console.print("[yellow]Shutdown requested — aborting agent loop.[/yellow]")
+                console.print(
+                    "[yellow]Shutdown requested — aborting agent loop.[/yellow]"
+                )
                 await _cleanup_browser_on_cancellation()
                 _cycle_outcome = "shutdown"
                 break
@@ -253,7 +272,10 @@ async def _legacy_agent_loop(
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
                     }
                     for tc in msg.tool_calls
                 ]
@@ -272,23 +294,36 @@ async def _legacy_agent_loop(
                 except json.JSONDecodeError:
                     args = {}
 
-                console.print(f"[yellow]Tool:[/yellow] {fn_name}({_truncate_args(args)})")
+                console.print(
+                    f"[yellow]Tool:[/yellow] {fn_name}({_truncate_args(args)})"
+                )
                 _cycle_tool_names.append(fn_name)
 
-                result = await _execute_tool_with_timeout(settings, tools, fn_name, args)
+                result = await _execute_tool_with_timeout(
+                    settings, tools, fn_name, args
+                )
                 result_str = json.dumps(result, default=str, ensure_ascii=False)
 
                 console.print(f"[dim]Result:[/dim] {result_str[:200]}")
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result_str,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result_str,
+                    }
+                )
         else:
             console.print("[yellow]Agent hit max iterations limit.[/yellow]")
             _cycle_outcome = "max_iterations"
 
+    except asyncio.CancelledError:
+        # Terminal cancellation is not a failure — record it distinctly so
+        # cycle summaries do not report a cancelled cycle as "completed".
+        _cycle_error_type = "CancelledError"
+        _cycle_error_category = "cancelled"
+        _cycle_outcome = "cancelled"
+        raise
     except Exception as exc:
         _cycle_error_type = type(exc).__name__
         _cycle_error_category = "loop_error"
@@ -328,13 +363,18 @@ async def _routed_agent_loop(
     policy = RoutingPolicy(registry)
     usage_tracker = UsageTracker(registry) if settings.routing_budget_enabled else None
 
-    system_prompt = system_prompt_override or build_system_prompt(talos_config, context, settings)
+    system_prompt = system_prompt_override or build_system_prompt(
+        talos_config, context, settings
+    )
     tool_schemas = tools.openai_schemas()
     has_tools = bool(tool_schemas)
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Decide and execute your next actions based on the current context."},
+        {
+            "role": "user",
+            "content": "Decide and execute your next actions based on the current context.",
+        },
     ]
 
     # ── Cycle-summary bookkeeping ─────────────────────────
@@ -350,7 +390,9 @@ async def _routed_agent_loop(
     try:
         for iteration in range(settings.max_iterations):
             if shutdown_event and shutdown_event.is_set():
-                console.print("[yellow]Shutdown requested — aborting agent loop.[/yellow]")
+                console.print(
+                    "[yellow]Shutdown requested — aborting agent loop.[/yellow]"
+                )
                 await _cleanup_browser_on_cancellation()
                 _cycle_outcome = "shutdown"
                 break
@@ -365,7 +407,9 @@ async def _routed_agent_loop(
             # Build routing constraints
             constraints = RoutingConstraints(
                 task_type=task_type,
-                max_cost_usd=settings.routing_max_cost_usd if settings.routing_max_cost_usd > 0 else None,
+                max_cost_usd=settings.routing_max_cost_usd
+                if settings.routing_max_cost_usd > 0
+                else None,
                 preferred_provider=settings.routing_preferred_provider or None,
                 require_capabilities={"tool_calling"} if has_tools else set(),
                 bypass_fallback=not settings.routing_fallback_enabled,
@@ -386,7 +430,9 @@ async def _routed_agent_loop(
             ) -> dict[str, Any]:
                 p = registry.get(provider_name)
                 return await p.complete(
-                    model=decision.model if provider_name == decision.provider_name else p.metadata.default_model,
+                    model=decision.model
+                    if provider_name == decision.provider_name
+                    else p.metadata.default_model,
                     messages=local_messages,
                     tools=local_tools if local_tools else None,
                 )
@@ -406,7 +452,9 @@ async def _routed_agent_loop(
                 )
 
                 if not fb_result.success:
-                    console.print("[red]All providers failed — aborting agent cycle.[/red]")
+                    console.print(
+                        "[red]All providers failed — aborting agent cycle.[/red]"
+                    )
                     _cycle_outcome = "provider_failure"
                     break
 
@@ -416,11 +464,15 @@ async def _routed_agent_loop(
                 # No fallback — single provider
                 try:
                     response_data = await _complete(
-                        decision.provider_name, messages, tool_schemas if has_tools else None,
+                        decision.provider_name,
+                        messages,
+                        tool_schemas if has_tools else None,
                     )
                     used_provider = decision.provider_name
                 except Exception as exc:
-                    console.print(f"[red]Provider '{decision.provider_name}' failed: {exc}[/red]")
+                    console.print(
+                        f"[red]Provider '{decision.provider_name}' failed: {exc}[/red]"
+                    )
                     _cycle_outcome = "provider_failure"
                     break
 
@@ -451,7 +503,9 @@ async def _routed_agent_loop(
             assistant_msg: dict[str, Any] = {"role": "assistant"}
             if msg_content:
                 assistant_msg["content"] = msg_content
-                console.print(f"[blue]Agent ({used_provider}):[/blue] {msg_content[:200]}")
+                console.print(
+                    f"[blue]Agent ({used_provider}):[/blue] {msg_content[:200]}"
+                )
             if msg_tool_calls:
                 assistant_msg["tool_calls"] = msg_tool_calls
             messages.append(assistant_msg)
@@ -463,31 +517,50 @@ async def _routed_agent_loop(
 
             # Execute each tool call
             for tc in msg_tool_calls:
-                fn_name = tc["function"]["name"] if isinstance(tc, dict) else tc.function.name
+                fn_name = (
+                    tc["function"]["name"] if isinstance(tc, dict) else tc.function.name
+                )
                 try:
-                    raw_args = tc["function"]["arguments"] if isinstance(tc, dict) else tc.function.arguments
+                    raw_args = (
+                        tc["function"]["arguments"]
+                        if isinstance(tc, dict)
+                        else tc.function.arguments
+                    )
                     args = json.loads(raw_args)
                 except (json.JSONDecodeError, KeyError):
                     args = {}
 
-                console.print(f"[yellow]Tool:[/yellow] {fn_name}({_truncate_args(args)})")
+                console.print(
+                    f"[yellow]Tool:[/yellow] {fn_name}({_truncate_args(args)})"
+                )
                 _cycle_tool_names.append(fn_name)
 
-                result = await _execute_tool_with_timeout(settings, tools, fn_name, args)
+                result = await _execute_tool_with_timeout(
+                    settings, tools, fn_name, args
+                )
                 result_str = json.dumps(result, default=str, ensure_ascii=False)
 
                 console.print(f"[dim]Result:[/dim] {result_str[:200]}")
 
                 tc_id = tc["id"] if isinstance(tc, dict) else tc.id
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": result_str,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": result_str,
+                    }
+                )
         else:
             console.print("[yellow]Agent hit max iterations limit.[/yellow]")
             _cycle_outcome = "max_iterations"
 
+    except asyncio.CancelledError:
+        # Terminal cancellation is not a failure — record it distinctly so
+        # cycle summaries do not report a cancelled cycle as "completed".
+        _cycle_error_type = "CancelledError"
+        _cycle_error_category = "cancelled"
+        _cycle_outcome = "cancelled"
+        raise
     except Exception as exc:
         _cycle_error_type = type(exc).__name__
         _cycle_error_category = "loop_error"
@@ -545,6 +618,10 @@ def _emit_cycle_summary(
 
     This function must be called exactly once per cycle — both success and
     failure paths must reach it.
+
+    ``outcome`` is one of ``completed``, ``shutdown`` (cooperative stop via
+    the shutdown event), ``cancelled`` (asyncio cancellation),
+    ``max_iterations``, ``provider_failure``, or ``error``.
     """
     ended_at = datetime.now(timezone.utc).isoformat()
     tool_calls = len(tool_names)

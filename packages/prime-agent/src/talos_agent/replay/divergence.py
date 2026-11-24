@@ -73,11 +73,17 @@ class DivergenceReport:
 
     @property
     def has_divergence(self) -> bool:
-        return bool(self.diffs) or self.original_final_content != self.replay_final_content
+        return (
+            bool(self.diffs) or self.original_final_content != self.replay_final_content
+        )
 
     @property
     def tool_sequence_diverged(self) -> bool:
-        return bool(self.diffs) or self.extra_original_calls > 0 or self.extra_replay_calls > 0
+        return (
+            bool(self.diffs)
+            or self.extra_original_calls > 0
+            or self.extra_replay_calls > 0
+        )
 
     def summary(self) -> str:
         lines = [f"Divergence report for cycle {self.cycle_id}"]
@@ -93,7 +99,9 @@ class DivergenceReport:
                     f"({'name' if d.is_name_divergence else 'args'})"
                 )
             if self.extra_original_calls:
-                lines.append(f"    Original had {self.extra_original_calls} extra call(s)")
+                lines.append(
+                    f"    Original had {self.extra_original_calls} extra call(s)"
+                )
             if self.extra_replay_calls:
                 lines.append(f"    Replay had {self.extra_replay_calls} extra call(s)")
 
@@ -122,6 +130,7 @@ class DivergenceReport:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _extract_tool_calls(messages: list[dict]) -> list[dict]:
     """Extract all tool calls from an OpenAI-format message list."""
     calls = []
@@ -146,6 +155,7 @@ def _extract_final_content(messages: list[dict]) -> str | None:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def check_divergence(
     cycle_id: str,

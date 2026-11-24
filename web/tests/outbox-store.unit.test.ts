@@ -305,3 +305,72 @@ describe("outbox/store — listEvents / getEvent", () => {
     expect(await store.getEvent("missing")).toBeNull();
   });
 });
+
+describe("outbox/store — per-consumer delivery tracking", () => {
+  it("getConsumerDeliveries returns persisted consumer delivery rows for an event", async () => {
+    const rows = [
+      { id: "del_1", eventId: "evt_1", consumerId: "consumer-a", status: "acked", attempts: 1 },
+      { id: "del_2", eventId: "evt_1", consumerId: "consumer-b", status: "pending", attempts: 1 },
+    ];
+    mockDb.select.mockReturnValue(chainable(rows));
+
+    const result = await store.getConsumerDeliveries("evt_1");
+    expect(result).toHaveLength(2);
+    expect(result[0].consumerId).toBe("consumer-a");
+    expect(result[1].status).toBe("pending");
+  });
+
+  it("ackConsumer inserts an acked delivery row when none exists", async () => {
+    mockDb.select
+      .mockReturnValueOnce(chainable([{ id: "evt_1", eventType: "x", leaseId: "l1", status: "leased", maxAttempts: 8 }]))
+      .mockReturnValueOnce(chainable([]));
+    mockDb.insert.mockReturnValue(
+      chainable([{ id: "del_1", eventId: "evt_1", consumerId: "consumer-a", status: "acked", attempts: 1 }]),
+    );
+
+    const result = await store.ackConsumer("evt_1", "consumer-a", "l1");
+    expect(result?.status).toBe("acked");
+    expect(result?.attempts).toBe(1);
+    expect(mockDb.insert).toHaveBeenCalledTimes(1);
+  });
+
+  it("ackConsumer returns null when the event lease was lost", async () => {
+    mockDb.select.mockReturnValueOnce(chainable([]));
+    expect(await store.ackConsumer("evt_1", "consumer-a", "stale")).toBeNull();
+    expect(mockDb.insert).not.toHaveBeenCalled();
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("failConsumer schedules retry below maxAttempts and dead-letters at maxAttempts", async () => {
+    mockDb.select
+      .mockReturnValueOnce(chainable([{ id: "evt_1", eventType: "x", leaseId: "l1", status: "leased", maxAttempts: 3 }]))
+      .mockReturnValueOnce(chainable([{ id: "del_1", eventId: "evt_1", consumerId: "consumer-b", attempts: 1, maxAttempts: 3 }]));
+    mockDb.update.mockReturnValueOnce(
+      chainable([{ id: "del_1", eventId: "evt_1", consumerId: "consumer-b", status: "pending", attempts: 2, maxAttempts: 3 }]),
+    );
+
+    const retried = await store.failConsumer("evt_1", "consumer-b", "l1", new Error("timeout"));
+    expect(retried?.status).toBe("pending");
+    expect(retried?.attempts).toBe(2);
+
+    mockDb.select
+      .mockReturnValueOnce(chainable([{ id: "evt_1", eventType: "x", leaseId: "l2", status: "leased", maxAttempts: 3 }]))
+      .mockReturnValueOnce(chainable([{ id: "del_1", eventId: "evt_1", consumerId: "consumer-b", attempts: 2, maxAttempts: 3 }]));
+    mockDb.update.mockReturnValueOnce(
+      chainable([{ id: "del_1", eventId: "evt_1", consumerId: "consumer-b", status: "dead_letter", attempts: 3, maxAttempts: 3 }]),
+    );
+
+    const deadLettered = await store.failConsumer("evt_1", "consumer-b", "l2", new Error("fatal"));
+    expect(deadLettered?.status).toBe("dead_letter");
+    expect(deadLettered?.attempts).toBe(3);
+  });
+
+  it("rescheduleForRetry and deadLetter respect lease ownership", async () => {
+    mockDb.update.mockReturnValueOnce(chainable([{ id: "evt_1", eventType: "x", status: "pending", attempts: 1 }]));
+    const rescheduled = await store.rescheduleForRetry("evt_1", "l1", new Date(Date.now() + 5_000), new Error("retry"));
+    expect(rescheduled?.status).toBe("pending");
+
+    mockDb.update.mockReturnValueOnce(chainable([]));
+    expect(await store.deadLetter("evt_1", "stale", new Error("fatal"))).toBeNull();
+  });
+});

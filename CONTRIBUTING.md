@@ -22,7 +22,15 @@ Install these before you start working locally:
 Before starting, run `pnpm doctor` to check the required local tool versions
 and the Rust Wasm target. The optional Stellar CLI is reported as a warning;
 missing or outdated required tools make the command exit with a non-zero code.
-Run its mocked platform-independent checks with `pnpm doctor:test`.
+Use `pnpm doctor:json` for machine-readable findings, including each tool's
+expected range and observed version. The JSON report preserves the doctor's
+stable exit codes. Run its mocked platform-independent checks with
+`pnpm doctor:test`.
+
+The supported Node.js, pnpm, Python, Rust, and schema versions are recorded in
+[`compatibility.json`](compatibility.json) and checked with
+`pnpm run compat:check`. See [`docs/compatibility.md`](docs/compatibility.md)
+when adding support for a new toolchain or schema version.
 
 For the Rust contracts, also add the Wasm target:
 
@@ -322,6 +330,11 @@ cargo test --target wasm32-unknown-unknown
 ## Focused Test Selection and CI Triage
 
 Run the smallest test set that covers the files you touched before falling back to a full suite. The commands below avoid database resets and hidden local state. Run them after installing dependencies with `pnpm install` at the repository root, `uv sync --extra dev` in `packages/prime-agent/`, or the Rust setup from the prerequisites. In this section, commands that call package scripts use `pnpm run <script>` so the script name can be checked directly in the package's `package.json`.
+
+If you change a documented `npm` or `pnpm` command, run
+`pnpm run docs:scripts:check` to confirm it still matches the target
+`package.json`. See
+[`docs/documented-scripts.md`](docs/documented-scripts.md).
 
 ### Web changes
 

@@ -46,6 +46,14 @@ ActionSpec  ──→  PolicyEngine.evaluate()  ──→  PolicyResult
 - **ESCALATE**: Action requires human approval via `request_approval`.
 - **DENY**: Action is blocked; the engine returns an error.
 
+Action names must be registered with the policy engine. Gated and read-only
+bypass actions retain their current categories, and existing registered tools
+without an explicit policy category retain their current behavior. Any name
+outside the registered action catalog is denied with an
+`Unknown policy action category` reason before rule evaluation. Known actions
+continue to be approved when the engine is disabled. New tools must be added
+to the action catalog before they can execute through a policy-enabled registry.
+
 ## Severities
 
 - **BLOCKER**: Hard stop. First match short-circuits with DENY.
@@ -90,7 +98,12 @@ Policies are JSON files or Python dataclasses. Example:
 }
 ```
 
-Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
+Save to `~/.talos-agent/policies.json`. The engine hot-reloads on file change
+after validating and dry-run simulating the candidate policy set. If the file
+cannot be parsed, a rule is invalid, or the simulation fails, the active
+last-known-good policy snapshot remains in effect. The failed reload is logged
+and retried on the next hot-reload check; invalid policy data is not treated as
+an empty override set.
 
 ### Time-bounded exceptions
 
@@ -165,25 +178,48 @@ from talos_agent.policy import PolicySimulator, PolicyEngine
 
 engine = PolicyEngine()
 engine.enabled = True
-engine.load(loader.load())
+engine.reload(loader.load())
 
 sim = PolicySimulator(engine)
 result = sim.simulate("transfer_xlm", {"amount": 500}, {"budget_remaining": 1000})
 print(result.decision)  # "escalate"
 ```
 
-### Offline policy comparison
+## Approved Action Binding & Exact Simulated Policy Digest
 
-Run the same synthetic scenarios against two policy versions and see what
-changes. Each version is evaluated on its own temporary engine, so nothing is
-enforced and live engine metrics are untouched.
+To prevent parameter tampering or executing an action under a policy that changed after review, approved action executions are cryptographically bound to both:
 
-```python
-report = PolicySimulator.compare_policies(old_policies, new_policies, scenarios)
-report["newly_allowed"]  # approve in new, not in old
-report["newly_denied"]   # approve in old, deny/escalate in new
-report["other_changes"]  # e.g. escalate -> deny
-```
+1. **Canonical Action Identity (`action_digest`)**: SHA-256 hash of the canonical JSON payload (`action`, `params`, and `context`).
+2. **Canonical Policy Identity (`policy_digest`)**: SHA-256 hash of the complete active policy ruleset and engine configuration at review time.
+
+### Workflow
+
+1. **Simulate & Create Approval Request**:
+   ```python
+   sim_result, approval = sim.create_approval(
+       action="transfer_xlm",
+       params={"amount": 500, "to": "GB123..."},
+       approval_id="app-456",
+   )
+   ```
+2. **Review & Approve**:
+   ```python
+   approval.approve(decided_by="operator_alice", reason="Approved budget transfer")
+   store.save(approval)  # Persisted to DB with exact digests
+   ```
+3. **Execution Verification**:
+   Before executing the approved action, verify that neither the action parameters nor the policy rules changed after review:
+   ```python
+   # Raises ActionDigestMismatchError or PolicyDigestMismatchError if tampered
+   engine.verify_approved_execution(approval, spec)
+
+   # Or evaluate via PolicyResult with detailed audit trace:
+   result = engine.evaluate_approved(approval, spec)
+   if result.decision == PolicyDecision.APPROVE:
+       await execute_action()
+   ```
+
+If either the action arguments or the active policy rules were modified after review, execution is rejected immediately.
 
 ## Rollback / disabling
 
@@ -193,8 +229,9 @@ export POLICY_ENGINE_ENABLED=false
 # or remove/comment the config key
 ```
 
-The engine is backwards-compatible: when disabled, all actions proceed as
-before.  Inline checks in individual tools continue to operate independently.
+When disabled, known actions retain their prior behavior and proceed without
+policy evaluation. Unsupported action names remain denied. Inline checks in
+individual tools continue to operate independently.
 
 
 ## Decision traces
@@ -215,21 +252,25 @@ Traces include per-rule and per-condition steps.  Secret-shaped fields
 `[redacted]` and never logged or returned in cleartext.  BLOCKER
 short-circuits still emit the full trace up to the denying rule.
 
-### Dry-run policy coverage
-
-Simulation traces can be aggregated without exposing action parameters:
+To export one simulated action's explanation as JSON:
 
 ```python
-report = sim.coverage_report(simulate_batch_results)
-print(report.to_dict())
+sim.export_decision(
+  "transfer_xlm",
+  "decision.json",
+  params={"amount": 500, "beneficiary_note": "..."},
+  private_arguments={"beneficiary_note"},
+)
 ```
 
-Coverage is based only on rule steps present in the redacted traces. Each
-observed rule reports its `matched` and `not_matched` branches as exercised or
-unexercised. A rule omitted from every trace, including a rule after a blocker
-short-circuit, is listed under `unobserved_rules` and is not counted as tested.
-This prevents a partial dry-run cycle from falsely claiming coverage for
-rules it never reached.
+The export includes the decision, matched policy/rule IDs, bounded reasons,
+condition trace steps, and bounded arguments. Built-in sensitive field names
+are redacted automatically; pass `private_arguments` for tool arguments whose
+privacy classification comes from the tool schema or caller. Nested arguments
+can be classified with dotted paths; classified values are also redacted if a
+policy condition references them. The export is a simulation and does not
+enforce or execute the action. Existing `export_scenarios` batch exports and
+`PolicyResult` interfaces are unchanged.
 
 ## Observability
 

@@ -1,7 +1,7 @@
-import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, lt, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { tlsJobs, tlsJobAttempts } from "@/db/schema";
-import type { AttemptTerminalReason, EnqueueOptions, JobAttemptRecord, JobRecord, JobStatus, RetryClass } from "./types";
+import { tlsJobs } from "@/db/schema";
+import type { EnqueueOptions, JobRecord, JobStatus, LeaseFence, RetryClass } from "./types";
 import { decideRetry } from "./retry";
 import { jobsConfig } from "./config";
 import { boundError, boundResult, logJobEvent } from "./metrics";
@@ -13,6 +13,40 @@ export class CancellationConflictError extends Error {
     super(`cancellation conflict: job ${jobId} already completed`);
     this.name = "CancellationConflictError";
   }
+}
+
+/**
+ * Thrown when a worker attempts to apply a result-side effect after its lease
+ * has been replaced by a newer generation or otherwise lost.
+ */
+export class StaleLeaseError extends Error {
+  readonly code = "STALE_LEASE" as const;
+  readonly jobId: string;
+  readonly leaseId: string;
+  readonly leaseGeneration: number;
+
+  constructor(fence: LeaseFence, message?: string) {
+    super(
+      message ??
+        `Lease fence rejected for job "${fence.jobId}" (generation ${fence.leaseGeneration}): lease was replaced or lost`,
+    );
+    this.name = "StaleLeaseError";
+    this.jobId = fence.jobId;
+    this.leaseId = fence.leaseId;
+    this.leaseGeneration = fence.leaseGeneration;
+  }
+}
+
+function leaseWhere(jobId: string, leaseId: string, leaseGeneration?: number) {
+  const conditions = [
+    eq(tlsJobs.id, jobId),
+    eq(tlsJobs.leaseId, leaseId),
+    eq(tlsJobs.status, "leased"),
+  ];
+  if (leaseGeneration !== undefined) {
+    conditions.push(eq(tlsJobs.leaseGeneration, leaseGeneration));
+  }
+  return and(...conditions);
 }
 
 function toRecord(row: typeof tlsJobs.$inferSelect): JobRecord {
@@ -188,6 +222,7 @@ export async function leaseBatch(
     SET
       status = 'leased',
       "leaseId" = gen_random_uuid()::text,
+      "leaseGeneration" = "leaseGeneration" + 1,
       "leaseOwner" = ${workerId},
       "leaseExpiresAt" = ${leaseExpiresAt},
       "heartbeatAt" = now(),
@@ -207,7 +242,13 @@ export async function leaseBatch(
 
   const rows = (result as unknown as { rows: (typeof tlsJobs.$inferSelect)[] }).rows ?? [];
   for (const row of rows) {
-    logJobEvent("job_leased", { jobId: row.id, queue: row.queue, attempts: row.attempts, workerId });
+    logJobEvent("job_leased", {
+      jobId: row.id,
+      queue: row.queue,
+      attempts: row.attempts,
+      workerId,
+      leaseGeneration: row.leaseGeneration,
+    });
   }
   return rows.map(toRecord);
 }
@@ -226,29 +267,74 @@ export async function heartbeat(
   jobId: string,
   leaseId: string,
   leaseDurationMs: number = jobsConfig.leaseDurationMs,
+  leaseGeneration?: number,
 ): Promise<{ ok: boolean; cancelled: boolean }> {
-  const leaseExpiresAt = sql`now() + (${leaseDurationMs}::text || ' milliseconds')::interval`;
+  if (
+    !Number.isFinite(leaseDurationMs) ||
+    leaseDurationMs <= 0 ||
+    leaseDurationMs > jobsConfig.maxLeaseExtensionMs ||
+    leaseDurationMs > jobsConfig.maxLeaseHorizonMs
+  ) {
+    return { ok: false, cancelled: false };
+  }
+
+  const candidateExpiresAt = sql`now() + (${leaseDurationMs}::text || ' milliseconds')::interval`;
+  const leaseExpiresAt = sql`GREATEST(${tlsJobs.leaseExpiresAt}, ${candidateExpiresAt})`;
   const [row] = await db
     .update(tlsJobs)
     .set({ leaseExpiresAt, heartbeatAt: sql`now()` })
-    .where(
-      and(
-        eq(tlsJobs.id, jobId),
-        eq(tlsJobs.leaseId, leaseId),
-        eq(tlsJobs.status, "leased"),
-        gt(tlsJobs.leaseExpiresAt, sql`now()`),
-      ),
-    )
+    .where(leaseWhere(jobId, leaseId, leaseGeneration))
     .returning({ cancelRequested: tlsJobs.cancelRequested, queue: tlsJobs.queue });
 
   if (!row) return { ok: false, cancelled: false };
-  logJobEvent("job_heartbeat", { jobId, queue: row.queue });
+  logJobEvent("job_heartbeat", { jobId, queue: row.queue, leaseGeneration });
   return { ok: true, cancelled: row.cancelRequested };
 }
 
-/** Marks a leased job completed. Bounds oversized or unserializable results independently of errors. No-ops (returns null) if the lease was lost. */
-export async function complete(jobId: string, leaseId: string, result: unknown, durationMs?: number): Promise<JobRecord | null> {
-  const bounded = boundResult(result, jobsConfig.maxResultBytes);
+/**
+ * Verifies that the supplied lease fence (jobId, leaseId, monotonic
+ * leaseGeneration) is still the active lease in the database.
+ */
+export async function verifyLease(fence: LeaseFence): Promise<boolean> {
+  const row = await db
+    .select({ id: tlsJobs.id })
+    .from(tlsJobs)
+    .where(leaseWhere(fence.jobId, fence.leaseId, fence.leaseGeneration))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+  return row !== null;
+}
+
+/**
+ * Guards a result-side effect with monotonic lease-generation fencing.
+ * Rejects the effect with `StaleLeaseError` if the worker's lease has been
+ * replaced or lost, preventing stale workers from applying side effects.
+ */
+export async function withLeaseFence<T>(
+  fence: LeaseFence,
+  effect: (fence: LeaseFence) => Promise<T>,
+  queue: string = "unknown",
+): Promise<T> {
+  const valid = await verifyLease(fence);
+  if (!valid) {
+    logJobEvent("job_lease_fenced", {
+      jobId: fence.jobId,
+      queue,
+      leaseGeneration: fence.leaseGeneration,
+    });
+    throw new StaleLeaseError(fence);
+  }
+  return effect(fence);
+}
+
+/** Marks a leased job completed. Rejects (returns null) if the lease or generation was replaced. */
+export async function complete(
+  jobId: string,
+  leaseId: string,
+  result: unknown,
+  durationMs?: number,
+  leaseGeneration?: number,
+): Promise<JobRecord | null> {
   const [row] = await db
     .update(tlsJobs)
     .set({
@@ -259,21 +345,20 @@ export async function complete(jobId: string, leaseId: string, result: unknown, 
       leaseOwner: null,
       leaseExpiresAt: null,
     })
-    .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
+    .where(leaseWhere(jobId, leaseId, leaseGeneration))
     .returning();
 
-  if (!row) return null;
-  if (bounded.truncated) {
-    logJobEvent("job_result_truncated", {
-      jobId,
-      queue: row.queue,
-      attempts: row.attempts,
-      reason: bounded.reason,
-      actualBytes: bounded.actualBytes,
-      maxBytes: bounded.maxBytes,
-    });
+  if (!row) {
+    logJobEvent("job_lease_fenced", { jobId, queue: "unknown", leaseGeneration });
+    return null;
   }
-  logJobEvent("job_completed", { jobId, queue: row.queue, attempts: row.attempts, durationMs });
+  logJobEvent("job_completed", {
+    jobId,
+    queue: row.queue,
+    attempts: row.attempts,
+    durationMs,
+    leaseGeneration: row.leaseGeneration,
+  });
   return toRecord(row);
 }
 
@@ -281,17 +366,26 @@ export async function complete(jobId: string, leaseId: string, result: unknown, 
  * Records a handler failure and applies the retry policy: either reschedule
  * (status back to pending, runAt pushed out by the backoff delay) or move
  * to dead_letter once the retry class/attempt ceiling says to stop.
- * Bounds `lastError` independently of `result`. No-ops if the lease was lost.
+ * Rejects (returns null) if the lease or generation was replaced.
  */
-export async function fail(jobId: string, leaseId: string, error: unknown, durationMs?: number): Promise<JobRecord | null> {
+export async function fail(
+  jobId: string,
+  leaseId: string,
+  error: unknown,
+  durationMs?: number,
+  leaseGeneration?: number,
+): Promise<JobRecord | null> {
   const current = await db
     .select()
     .from(tlsJobs)
-    .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
+    .where(leaseWhere(jobId, leaseId, leaseGeneration))
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  if (!current) return null;
+  if (!current) {
+    logJobEvent("job_lease_fenced", { jobId, queue: "unknown", leaseGeneration });
+    return null;
+  }
 
   const boundedErr = boundError(error, jobsConfig.maxErrorBytes);
   const lastError = boundedErr.value;
@@ -314,21 +408,20 @@ export async function fail(jobId: string, leaseId: string, error: unknown, durat
     const [row] = await db
       .update(tlsJobs)
       .set({ status: "dead_letter", lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
-      .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
+      .where(leaseWhere(jobId, leaseId, leaseGeneration))
       .returning();
-    if (!row) return null;
-
-    await recordAttempt({
-      jobId: row.id,
-      attemptNumber: row.attempts,
-      workerId: current.leaseOwner,
-      leaseId,
+    if (!row) {
+      logJobEvent("job_lease_fenced", { jobId, queue: current.queue, leaseGeneration });
+      return null;
+    }
+    logJobEvent("job_dead_letter", {
+      jobId,
+      queue: row.queue,
+      attempts: row.attempts,
+      maxAttempts: row.maxAttempts,
       durationMs,
-      terminalReason: "dead_letter",
-      error: lastError,
+      leaseGeneration: row.leaseGeneration,
     });
-
-    logJobEvent("job_dead_letter", { jobId, queue: row.queue, attempts: row.attempts, maxAttempts: row.maxAttempts, durationMs });
     return toRecord(row);
   }
 
@@ -336,21 +429,20 @@ export async function fail(jobId: string, leaseId: string, error: unknown, durat
   const [row] = await db
     .update(tlsJobs)
     .set({ status: "pending", runAt, lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
-    .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
+    .where(leaseWhere(jobId, leaseId, leaseGeneration))
     .returning();
-  if (!row) return null;
-
-  await recordAttempt({
-    jobId: row.id,
-    attemptNumber: row.attempts,
-    workerId: current.leaseOwner,
-    leaseId,
+  if (!row) {
+    logJobEvent("job_lease_fenced", { jobId, queue: current.queue, leaseGeneration });
+    return null;
+  }
+  logJobEvent("job_retry_scheduled", {
+    jobId,
+    queue: row.queue,
+    attempts: row.attempts,
+    delayMs: decision.delayMs,
     durationMs,
-    terminalReason: "retry_scheduled",
-    error: lastError,
+    leaseGeneration: row.leaseGeneration,
   });
-
-  logJobEvent("job_retry_scheduled", { jobId, queue: row.queue, attempts: row.attempts, delayMs: decision.delayMs, durationMs });
   return toRecord(row);
 }
 
@@ -359,11 +451,15 @@ export async function fail(jobId: string, leaseId: string, error: unknown, durat
  * recording an error. Used by graceful shutdown to return in-flight jobs to
  * the pool immediately instead of waiting out the full lease timeout.
  */
-export async function release(jobId: string, leaseId: string): Promise<JobRecord | null> {
+export async function release(
+  jobId: string,
+  leaseId: string,
+  leaseGeneration?: number,
+): Promise<JobRecord | null> {
   const [row] = await db
     .update(tlsJobs)
     .set({ status: "pending", leaseId: null, leaseOwner: null, leaseExpiresAt: null, heartbeatAt: null })
-    .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
+    .where(leaseWhere(jobId, leaseId, leaseGeneration))
     .returning();
   return row ? toRecord(row) : null;
 }
@@ -494,5 +590,257 @@ export interface ListJobsFilter {
 }
 
 export async function listJobs(filter: ListJobsFilter = {}): Promise<{ jobs: JobRecord[]; nextCursor: string | null }> {
-  const limit = Math.min(Math.max(filter.limit ?? jobsConfig.batchSize, 1), 100);
+  const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+  const conditions = [];
+  if (filter.status) conditions.push(eq(tlsJobs.status, filter.status));
+  if (filter.queue) conditions.push(eq(tlsJobs.queue, filter.queue));
+  if (filter.cursor) conditions.push(lt(tlsJobs.createdAt, new Date(filter.cursor)));
+
+  const rows = await db
+    .select()
+    .from(tlsJobs)
+    .where(conditions.length ? and(...conditions) : undefined)
+    .orderBy(desc(tlsJobs.createdAt))
+    .limit(limit + 1);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? page[page.length - 1]?.createdAt.toISOString() ?? null : null;
+  return { jobs: page.map(toRecord), nextCursor };
+}
+
+export async function getJob(jobId: string): Promise<JobRecord | null> {
+  const row = await db.select().from(tlsJobs).where(eq(tlsJobs.id, jobId)).limit(1).then((r) => r[0] ?? null);
+  return row ? toRecord(row) : null;
+}
+
+// ─── Bulk retry preview & revision-checked execution ───────────────
+
+/**
+ * Returns the optimistic-concurrency revision token for a job (`updatedAt` as
+ * an ISO-8601 timestamp). Callers pass this token back when executing a bulk
+ * retry so any concurrent modification rejects the stale retry.
+ */
+export function getJobRevision(job: Pick<JobRecord, "updatedAt">): string {
+  const updatedAt = job.updatedAt instanceof Date ? job.updatedAt : new Date(job.updatedAt);
+  return updatedAt.toISOString();
+}
+
+function evaluateBulkRetryEligibility(
+  job: JobRecord,
+  filter: Pick<BulkRetryFilter, "queue" | "retryClass" | "includeCancelled" | "allowFatal">,
+): BulkRetryReason {
+  if (filter.queue && job.queue !== filter.queue) return "queue_mismatch";
+  if (filter.retryClass && job.retryClass !== filter.retryClass) return "retry_class_mismatch";
+
+  if (job.status === "cancelled") {
+    if (!filter.includeCancelled) return "cancelled_excluded";
+  } else if (job.status !== "dead_letter") {
+    return "status_not_failed";
+  }
+
+  if (job.retryClass === "fatal" && !filter.allowFatal) return "fatal_retry_class";
+  return "eligible";
+}
+
+/**
+ * Dry-run preview for bulk retrying failed jobs. Filters candidate jobs,
+ * classifies each as eligible or ineligible with an explicit reason, and
+ * returns counts by reason plus each eligible job's revision token.
+ * Performs no mutations.
+ */
+export async function previewBulkRetry(filter: BulkRetryFilter = {}): Promise<BulkRetryPreview> {
+  const includeCancelled = filter.includeCancelled ?? false;
+  const allowFatal = filter.allowFatal ?? false;
+  const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+
+  let rows: JobRecord[];
+  const missingIds: string[] = [];
+
+  if (filter.jobIds && filter.jobIds.length > 0) {
+    const uniqueIds = Array.from(new Set(filter.jobIds));
+    const fetched = await db.select().from(tlsJobs).where(inArray(tlsJobs.id, uniqueIds));
+    const byId = new Map(fetched.map((row) => [row.id, toRecord(row)]));
+    rows = [];
+    for (const id of uniqueIds) {
+      const found = byId.get(id);
+      if (found) rows.push(found);
+      else missingIds.push(id);
+    }
+  } else {
+    const conditions = [];
+    if (filter.queue) conditions.push(eq(tlsJobs.queue, filter.queue));
+    if (filter.retryClass) conditions.push(eq(tlsJobs.retryClass, filter.retryClass));
+
+    const fetched = await db
+      .select()
+      .from(tlsJobs)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(tlsJobs.createdAt))
+      .limit(limit);
+    rows = fetched.map(toRecord);
+  }
+
+  const eligible: BulkRetryCandidate[] = [];
+  const ineligible: BulkRetryExcluded[] = [];
+  const countsByReason: Partial<Record<BulkRetryReason, number>> = {};
+  const increment = (reason: BulkRetryReason) => {
+    countsByReason[reason] = (countsByReason[reason] ?? 0) + 1;
+  };
+
+  for (const id of missingIds) {
+    increment("not_found");
+    ineligible.push({
+      id,
+      queue: null,
+      status: null,
+      retryClass: null,
+      revision: null,
+      reason: "not_found",
+    });
+  }
+
+  for (const job of rows) {
+    const revision = getJobRevision(job);
+    const reason = evaluateBulkRetryEligibility(job, {
+      queue: filter.queue,
+      retryClass: filter.retryClass,
+      includeCancelled,
+      allowFatal,
+    });
+    increment(reason);
+
+    if (reason === "eligible") {
+      eligible.push({
+        id: job.id,
+        queue: job.queue,
+        status: job.status,
+        retryClass: job.retryClass,
+        attempts: job.attempts,
+        maxAttempts: job.maxAttempts,
+        lastError: job.lastError,
+        revision,
+        reason: "eligible",
+      });
+    } else {
+      ineligible.push({
+        id: job.id,
+        queue: job.queue,
+        status: job.status,
+        retryClass: job.retryClass,
+        revision,
+        reason,
+      });
+    }
+  }
+
+  return {
+    dryRun: true,
+    totalEvaluated: eligible.length + ineligible.length,
+    eligibleCount: eligible.length,
+    ineligibleCount: ineligible.length,
+    countsByReason,
+    eligible,
+    ineligible,
+  };
+}
+
+/**
+ * Executes a bulk retry for explicitly selected `(id, revision)` pairs.
+ * Each job is requeued atomically only if its `updatedAt` revision is still
+ * unchanged and it remains in an eligible failed state; any stale or
+ * ineligible job is skipped with an explicit reason.
+ */
+export async function executeBulkRetry(
+  selections: BulkRetrySelection[],
+  opts: { includeCancelled?: boolean; allowFatal?: boolean } = {},
+): Promise<BulkRetryExecutionResult> {
+  const includeCancelled = opts.includeCancelled ?? false;
+  const allowFatal = opts.allowFatal ?? false;
+  const requeued: JobRecord[] = [];
+  const skipped: BulkRetrySkippedItem[] = [];
+
+  for (const selection of selections) {
+    const expectedDate = new Date(selection.revision);
+    if (!selection.revision || Number.isNaN(expectedDate.getTime())) {
+      skipped.push({
+        id: selection.id,
+        expectedRevision: selection.revision,
+        currentRevision: null,
+        reason: "invalid_revision",
+      });
+      continue;
+    }
+
+    const statusCond = includeCancelled
+      ? sql`${tlsJobs.status} IN ('dead_letter', 'cancelled')`
+      : eq(tlsJobs.status, "dead_letter");
+
+    const whereConds = [
+      eq(tlsJobs.id, selection.id),
+      eq(tlsJobs.updatedAt, expectedDate),
+      statusCond,
+    ];
+    if (!allowFatal) {
+      whereConds.push(ne(tlsJobs.retryClass, "fatal"));
+    }
+
+    const [updated] = await db
+      .update(tlsJobs)
+      .set({
+        status: "pending",
+        attempts: 0,
+        lastError: null,
+        cancelRequested: false,
+        runAt: sql`now()`,
+        updatedAt: sql`now()`,
+      })
+      .where(and(...whereConds))
+      .returning();
+
+    if (updated) {
+      const record = toRecord(updated);
+      requeued.push(record);
+      continue;
+    }
+
+    const current = await getJob(selection.id);
+    if (!current) {
+      skipped.push({
+        id: selection.id,
+        expectedRevision: selection.revision,
+        currentRevision: null,
+        reason: "not_found",
+      });
+      continue;
+    }
+
+    const currentRevision = getJobRevision(current);
+    if (currentRevision !== expectedDate.toISOString()) {
+      skipped.push({
+        id: selection.id,
+        expectedRevision: selection.revision,
+        currentRevision,
+        reason: "revision_mismatch",
+      });
+      continue;
+    }
+
+    const reason = evaluateBulkRetryEligibility(current, { includeCancelled, allowFatal });
+    skipped.push({
+      id: selection.id,
+      expectedRevision: selection.revision,
+      currentRevision,
+      reason: reason === "eligible" ? "revision_mismatch" : reason,
+    });
+  }
+
+  return {
+    dryRun: false,
+    requestedCount: selections.length,
+    requeuedCount: requeued.length,
+    skippedCount: skipped.length,
+    requeued,
+    skipped,
+  };
 }

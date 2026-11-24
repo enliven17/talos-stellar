@@ -157,10 +157,10 @@
       "breakpoints": true
     },
     {
-      "idx": 22,
+      "idx": 21,
       "version": "7",
       "when": 1754247600000,
-      "tag": "0023_add_reconciler_network_passphrase",
+      "tag": "0023_add_outbox_deliveries",
       "breakpoints": true
     }
   ]

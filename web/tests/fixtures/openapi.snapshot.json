@@ -2422,6 +2422,17 @@
         },
         "description": "Sort direction (`asc` or `desc`). Defaults to `desc`."
       },
+      "talosAddressParam": {
+        "name": "address",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": "Exact-case Stellar address. Matches the agent wallet, creator, investor, or treasury address."
+      },
       "minScoreParam": {
         "name": "minScore",
         "in": "query",
@@ -2623,6 +2634,9 @@
           },
           {
             "$ref": "#/components/parameters/limitParam"
+          },
+          {
+            "$ref": "#/components/parameters/talosAddressParam"
           },
           {
             "$ref": "#/components/parameters/minScoreParam"
@@ -5619,7 +5633,9 @@
                           "type": "integer"
                         },
                         "totalRevenue": {
-                          "type": "string"
+                          "type": "string",
+                          "nullable": true,
+                          "description": "Formatted sum of observed revenue. `null` when no revenue observation exists; `\"$0.00\"` is a verified zero."
                         },
                         "pendingCount": {
                           "type": "integer"
@@ -5656,9 +5672,37 @@
                     },
                     "revenueStreams": {
                       "type": "array",
+                      "description": "One entry per agent with at least one revenue observation. Agents without observations are omitted rather than reported as $0.",
                       "items": {
                         "type": "object",
-                        "additionalProperties": true
+                        "properties": {
+                          "talosId": {
+                            "type": "string"
+                          },
+                          "talosName": {
+                            "type": "string"
+                          },
+                          "totalRevenue": {
+                            "type": "number",
+                            "nullable": true
+                          },
+                          "observationCount": {
+                            "type": "integer"
+                          },
+                          "bySource": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "number"
+                            }
+                          },
+                          "recentTx": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "additionalProperties": true
+                            }
+                          }
+                        }
                       }
                     },
                     "talosManagement": {

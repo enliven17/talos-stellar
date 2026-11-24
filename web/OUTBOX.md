@@ -12,6 +12,7 @@ multiple app instances with no coordinator.
 pending → leased → dispatched
                  ↘ pending      (retry — runAt pushed out by backoff)
                  ↘ dead_letter  (retries exhausted, or no consumer registered)
+                 ↘ quarantined  (payload violates its declared schema; terminal)
 ```
 
 ## Atomic write
@@ -37,20 +38,24 @@ await db.transaction(async (tx) => {
 ## Dispatch
 
 `dispatchOnce()` (`src/lib/outbox/dispatcher.ts`) leases a bounded batch,
-validates that each event's payload version is supported, runs every consumer
-registered for each event's `eventType` (`registerConsumer`,
-`src/lib/outbox/registry.ts`), and acks or retries the event as a whole.
-Events whose payload versions are unsupported (or unparseable/invalid) are
-immediately routed to `dead_letter` without consumer invocation or retries.
-Unversioned payloads default to version `1` for backward compatibility.
-**All consumers for an event type re-run on retry** — an
-event type has no per-consumer cursor, so consumers must be idempotent. An
-event type with zero registered consumers dead-letters immediately.
+runs each unacknowledged consumer registered for the event's `eventType`
+(`registerConsumer`, `src/lib/outbox/registry.ts`), and persists per-consumer
+acknowledgement and retry state in `tls_outbox_deliveries` keyed by
+`(eventId, consumerId)`. When one consumer succeeds and another fails, the
+successful consumer is marked `acked` and skipped on subsequent retries —
+only the failing consumer is retried according to its own backoff schedule.
+The event transitions to `dispatched` once all registered consumers are
+`acked`, or to `dead_letter` once no pending consumers remain and at least
+one consumer exhausted its retry budget. Pass an explicit stable consumer ID
+when registering (`registerConsumer(eventType, "my-consumer", handler)` or
+`registerConsumer(eventType, handler, { id: "my-consumer" })`); unnamed
+registrations remain supported with a deterministic fallback ID. An event
+type with zero registered consumers dead-letters immediately.
 
-Acknowledgements succeed only while the matching lease ID is still active
-and its deadline is in the future. A late consumer therefore cannot dispatch
-an expired lease or clear a newer worker's lease; its acknowledgement is
-ignored and the next dispatcher can recover or retry the event.
+Consumer registration semantics (`registerConsumer(eventType, handler, idOrOptions?)`):
+- **Multiple consumers**: Multiple distinct consumers may subscribe to the same event type.
+- **Idempotent registration**: Re-registering the same handler instance (or the same ID with the same handler) is an idempotent no-op and does not register duplicate handlers.
+- **Conflict rejection**: Registering a consumer with the same ID or function name as an existing consumer on the same event type, but with a conflicting (different) handler function, throws an `Error` during startup.
 
 Two ways to drive it, same trade-off as the jobs framework:
 - **Serverless**: `POST /api/internal/outbox/drain`, header
@@ -67,6 +72,41 @@ Two ways to drive it, same trade-off as the jobs framework:
 Crash recovery: every `dispatchOnce()` call reaps expired leases first
 (`reapExpiredLeases()`) — jobs with attempts left go back to `pending`,
 exhausted ones go to `dead_letter`. No separate recovery path.
+
+## Payload schema quarantine
+
+An event type may declare its payload contract:
+
+```ts
+import { z } from "zod";
+import { registerPayloadSchema } from "@/lib/outbox";
+
+registerPayloadSchema("commerce_job.completed", {
+  version: 1, // positive integer; bump when the contract changes
+  schema: z.object({ jobId: z.string(), amount: z.string() }),
+});
+```
+
+Before any consumer runs, `dispatchOnce()` validates the leased payload. If
+it violates the declared schema the event moves to the terminal
+**`quarantined`** status (lease-guarded, like `ack`/`fail`):
+
+- No consumer is invoked and no retry is scheduled — a structurally invalid
+  payload can never succeed, so it isn't re-leased or counted against
+  `maxAttempts`.
+- `schemaVersion` and a bounded `validationSummary` are persisted:
+  `{ schemaVersion, issueCount, issues: [{ path, code, message }], truncated }`
+  with at most 10 issues, paths/messages clipped to 200 chars, and **no
+  payload values**. `lastError` gets a one-line summary.
+- `POST /api/admin/outbox/:id/retry` does not requeue quarantined events
+  (409) — fix the producer and write a new event instead.
+- `DispatchSummary.quarantined` counts them; the transition logs
+  `outbox_event_quarantined` (eventId, eventType, schemaVersion, issueCount).
+- Successfully dispatched events record the `schemaVersion` they passed.
+
+Event types without a declared schema dispatch exactly as before
+(`schemaVersion` stays `null`). Migration:
+`drizzle/0023_outbox_payload_quarantine.sql` (two nullable columns, additive).
 
 ## Retry & deduplication
 
@@ -157,19 +197,20 @@ page through, and **Retry** a row via `POST /api/admin/outbox/:id/retry`).
 
 Structured `pino` logs per transition (`outbox_event_written`,
 `_leased`, `_dispatched`, `_retry_scheduled`, `_dead_letter`,
-`outbox_lease_reaped`, `outbox_events_pruned`) — identifiers and counters
+`outbox_consumer_acked`, `outbox_consumer_retry_scheduled`,
+`outbox_consumer_dead_letter`, `outbox_lease_reaped`,
+`outbox_events_pruned`) — identifiers and counters
 only, never `payload` or a raw error (see `src/lib/outbox/metrics.ts`;
 same rationale as `web/JOBS.md`).
 
 ## Rollout / migration / rollback
 
-- **Migration**: `drizzle/0012_add_outbox_events.sql` — additive only, one new table, no existing-table changes. Safe to apply live.
+- **Migration**: `drizzle/0012_add_outbox_events.sql` and `drizzle/0023_add_outbox_deliveries.sql` — additive only, new tables, no existing-table changes. Safe to apply live.
 - **Default**: `OUTBOX_ENABLED=false`. The one integrated call site (`POST /api/jobs/:id/result`, `src/app/api/jobs/[id]/result/route.ts`) writes nothing extra when disabled — zero behavior change.
 - **Rollback**: flip `OUTBOX_ENABLED` back to `false`. `tls_outbox_events` can stay in place (inert, nothing references it via FK) or be dropped independently.
 
 ## Known limitations
 
-- No per-consumer delivery tracking — an event type's consumers all re-run together on retry.
 - No priority/ordering guarantee across different aggregates; within one lease batch, order is `runAt` only.
 - The serverless drain endpoint needs an external scheduler wired up per-deployment (no Vercel Cron config checked in yet).
 

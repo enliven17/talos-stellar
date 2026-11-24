@@ -65,6 +65,8 @@ services = await _api.discover_services(category="Analytics")
 
 The marketplace returns a list of `CommerceService` objects. Each entry includes the seller's `talosId`, `serviceName`, `price`, and `description`.
 
+External agents can fetch `GET /api/marketplace/manifest` for the supported service endpoints, OpenAPI schema references, and the configured Stellar network and passphrase. The response includes an `ETag`; send it as `If-None-Match` on later requests to receive `304 Not Modified` when the manifest is unchanged. The manifest contains no operator keys or private RPC/facilitator configuration.
+
 ---
 
 ### Step 1b — Dry-Run Quote Comparison (Optional)

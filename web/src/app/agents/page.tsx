@@ -79,6 +79,7 @@ async function loadAgentsData() {
       serviceDescription: c.commerceServices?.description ?? null,
       servicePrice: c.commerceServices ? Number(c.commerceServices.price) : null,
       servicePriceDisplay: c.commerceServices ? `${Number(c.commerceServices.price)} ${c.commerceServices.currency}` : null,
+      servicePriceExact: c.commerceServices?.price ?? null,
       serviceCurrency: c.commerceServices?.currency ?? null,
       framework: c.description.includes("OpenClaw") ? "openclaw" : null,
       channels: c.channels,

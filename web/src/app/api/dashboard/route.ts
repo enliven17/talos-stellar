@@ -7,6 +7,7 @@ import { withRequestId } from "@/lib/with-request-id";
 
 import { badRequest, errorResponse, internalError } from "@/lib/api-response";
 import { parseStellarPublicKeyParam } from "@/lib/stellar-keys";
+import { summarizeRevenueObservations } from "@/lib/revenue-observations";
 
 /** Timeout in ms for dashboard database queries (under platform function limit). */
 export const DASHBOARD_QUERY_TIMEOUT_MS = 15_000;
@@ -88,8 +89,17 @@ async function _GET(req: NextRequest) {
     (sum, c) => sum + Number(c.pulsePrice) * c.totalSupply,
     0,
   );
-  const totalRevenue = talosRows.reduce(
-    (sum, c) => sum + c.revenues.reduce((rs, r) => rs + Number(r.amount), 0),
+  // Absence of revenue records is not evidence of zero revenue, so the
+  // aggregate is only reported once at least one observation exists.
+  const revenueSummaries = talosRows.map((c) => ({
+    talos: c,
+    summary: summarizeRevenueObservations(c.revenues),
+  }));
+  const hasRevenueObservations = revenueSummaries.some(
+    ({ summary }) => summary.hasObservations,
+  );
+  const totalRevenue = revenueSummaries.reduce(
+    (sum, { summary }) => sum + (summary.total ?? 0),
     0,
   );
 
@@ -149,27 +159,24 @@ async function _GET(req: NextRequest) {
     lastActive: c.agentLastSeen ? getRelativeTime(c.agentLastSeen) : "never",
   }));
 
-  const revenueStreams = talosRows
-    .map((c) => {
-      const talosRevenue = c.revenues.reduce((s, r) => s + Number(r.amount), 0);
-      const bySource: Record<string, number> = {};
-      for (const r of c.revenues) {
-        bySource[r.source] = (bySource[r.source] ?? 0) + Number(r.amount);
-      }
-      return {
-        talosId: c.id,
-        talosName: c.name,
-        totalRevenue: talosRevenue,
-        bySource,
-        recentTx: c.revenues.slice(0, 5).map((r) => ({
-          amount: Number(r.amount),
-          source: r.source,
-          currency: r.currency,
-          date: r.createdAt.toISOString(),
-        })),
-      };
-    })
-    .filter((r) => r.totalRevenue > 0);
+  // Keep streams that have at least one observation, including a verified
+  // zero. Streams with no observations are omitted rather than reported as $0.
+  const revenueStreams = revenueSummaries
+    .filter(({ summary }) => summary.hasObservations)
+    .map(({ talos: c, summary }) => ({
+      talosId: c.id,
+      talosName: c.name,
+      totalRevenue: summary.total,
+      observationCount: c.revenues.length,
+      ownerPublicKeys: [c.creatorPublicKey, c.walletPublicKey],
+      bySource: summary.bySource ?? {},
+      recentTx: c.revenues.slice(0, 5).map((r) => ({
+        amount: Number(r.amount),
+        source: r.source,
+        currency: r.currency,
+        date: r.createdAt.toISOString(),
+      })),
+    }));
 
   function maskApiKey(key: string | null): string | null {
     if (!key || key.length < 12) return null;
@@ -195,7 +202,7 @@ async function _GET(req: NextRequest) {
     stats: {
       totalValue: `$${Math.round(totalValue).toLocaleString()}`,
       activeTalos: talosRows.filter((c) => c.status === "Active").length,
-      totalRevenue: `$${totalRevenue.toFixed(2)}`,
+      totalRevenue: hasRevenueObservations ? `$${totalRevenue.toFixed(2)}` : null,
       pendingCount: pendingApprovals.length,
     },
     approvals: pendingApprovals,

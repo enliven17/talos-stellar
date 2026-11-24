@@ -24,7 +24,7 @@ pending|leased → cancelled   (cooperative — see Cancellation below)
 ```
 
 - **pending** — eligible for leasing once `runAt <= now()`.
-- **leased** — a worker holds it; `leaseId`/`leaseExpiresAt` identify the claim.
+- **leased** — a worker holds it; `leaseId`/`leaseGeneration`/`leaseExpiresAt` identify the claim.
 - **completed** — terminal, success. `result` holds the handler's return value.
 - **dead_letter** — terminal, failure. `lastError` holds the last (truncated) error message.
 - **cancelled** — terminal, cooperative cancellation.
@@ -63,6 +63,21 @@ path — every `runOnce()` call starts by reaping expired leases
 jobs that already exhausted their budget go straight to `dead_letter`. This
 is what makes leasing safe to run from multiple instances with no
 coordinator.
+
+### Lease fencing (monotonic generation)
+
+Every `leaseBatch()` claim atomically increments `leaseGeneration` (a monotonic
+integer that is never reset, even across retries, reaps, releases, or admin
+requeues). `runner.ts` carries `(jobId, leaseId, leaseGeneration)` into:
+
+- `ctx.leaseId` and `ctx.leaseGeneration` on `JobContext`
+- `ctx.applyEffect((fence) => ...)` — verifies the active `(jobId, leaseId, leaseGeneration)` via `withLeaseFence()` before executing a result-side effect and throws `StaleLeaseError` if the lease was replaced
+- `store.heartbeat()`, `store.complete()`, `store.fail()`, and `store.release()` — all reject updates when `leaseGeneration` no longer matches the active lease, emitting a `job_lease_fenced` log event
+
+Handlers performing external or database side effects should wrap them in
+`ctx.applyEffect(...)` (or pass `ctx.leaseGeneration` as a fencing token to
+downstream writes) so a slow worker whose lease was reaped and replaced cannot
+apply stale results.
 
 ## Retry classes
 
@@ -107,6 +122,8 @@ All read from the environment at process start (see `.env.example`):
 | `ADMIN_API_KEY` | — | Bearer token for `/api/admin/jobs/*`. Required to use those routes. |
 | `INTERNAL_JOBS_SECRET` | — | Shared secret for `/api/internal/jobs/drain`. Required to use it. |
 | `JOBS_LEASE_DURATION_MS` | `30000` | How long a lease is held before it's reapable. |
+| `JOBS_MAX_LEASE_EXTENSION_MS` | `3600000` | Maximum duration a single lease extension request may add or set. |
+| `JOBS_MAX_LEASE_HORIZON_MS` | `86400000` | Maximum absolute future horizon a lease may be extended to from `now`. |
 | `JOBS_HEARTBEAT_INTERVAL_MS` | `10000` | How often a running handler heartbeats. |
 | `JOBS_BATCH_SIZE` | `10` | Jobs claimed per `runOnce()` call. |
 | `JOBS_DEFAULT_MAX_ATTEMPTS` | `8` | Default ceiling for jobs that don't specify one. |
@@ -148,6 +165,7 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 - `GET /api/admin/jobs?status=&queue=&cursor=&limit=` — list, cursor-paginated by `createdAt` descending (same convention as the rest of the API — see `OBSERVABILITY.md`).
 - `GET /api/admin/jobs/:id` — full record, including `payload` and `result`, for debugging a stuck or dead-lettered job.
 - `POST /api/admin/jobs/:id/retry` — requeue a `dead_letter`/`cancelled` job (resets attempts, clears `lastError`). 409 if the job isn't in one of those states.
+- `POST /api/admin/jobs/bulk-retry` — dry-run bulk retry preview (`dryRun: true`, default) that filters candidate jobs, counts eligible vs. ineligible jobs with explicit reasons (`eligible`, `not_found`, `status_not_failed`, `cancelled_excluded`, `queue_mismatch`, `retry_class_mismatch`, `fatal_retry_class`), and returns each eligible job's `revision` (`updatedAt` ISO timestamp). Executing (`dryRun: false`) requires explicit `selections: [{ id, revision }]` and atomically verifies each job's revision is unchanged before requeuing (returning `409` if all requested jobs fail with `revision_mismatch`).
 - `POST /api/admin/jobs/:id/cancel` — cooperative cancel. 409 if the job is already in a terminal state.
 
 ## Observability
@@ -155,13 +173,11 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 Every state transition is a structured `pino` log line via `src/lib/jobs/metrics.ts`
 (`job_enqueued`, `job_leased`, `job_heartbeat`, `job_completed`,
 `job_retry_scheduled`, `job_dead_letter`, `job_cancelled`,
-`job_lease_reaped`, `job_result_truncated`, `job_error_truncated`) with `jobId`, `queue`, `attempts`, `durationMs`, etc.
-**Never** `payload`, `result`, or a raw error object — `lastError` and `result` on the
-row are bounded independently before persistence so neither field can trigger unbounded database writes:
-- `lastError` is bounded via `boundError()` / `truncateError()` down to the error's `message` only (no stack, no cause chain), capped at `JOBS_MAX_ERROR_BYTES` UTF-8 bytes (default 500) without splitting multi-byte UTF-8 code points, emitting `job_error_truncated` (`actualBytes`, `maxBytes`) when truncated.
-- `result` is bounded via `boundResult()` / `truncateResult()` against `JOBS_MAX_RESULT_BYTES` (default 65536 UTF-8 bytes of serialized JSON). Oversized or unserializable handler results are replaced with a stable diagnostic envelope (`{ truncated: true, reason, maxBytes, actualBytes, diagnostic }`) and emit `job_result_truncated` without failing the completed job.
-
-If a job's payload might itself carry something sensitive, that's a property of the
+`job_lease_reaped`, `job_lease_fenced`) with `jobId`, `queue`, `attempts`, `leaseGeneration`, `durationMs`, etc.
+**Never** `payload`, `result`, or a raw error object — `lastError` on the
+row (and in logs) is `truncateError()`'d down to the error's `message`
+only, capped at 500 characters, no stack, no cause chain. If a job's
+payload might itself carry something sensitive, that's a property of the
 specific handler/queue, not the framework — keep secrets out of job
 payloads the same way you'd keep them out of any other DB row a
 Bearer-token-gated endpoint (`/api/admin/jobs/:id`) can return.
@@ -178,7 +194,7 @@ occasionally on deploys, a signal of a stuck/crashing handler if frequent).
 
 ## Migration / rollback
 
-- **Forward migration**: `drizzle/0012_add_background_jobs.sql` — additive only, one new table (`tls_jobs`), no changes to existing tables. `pnpm db:migrate` applies it; safe to run against a live database with no downtime.
+- **Forward migration**: `drizzle/0016_add_background_jobs.sql` (table creation) and `drizzle/0024_add_job_lease_generation.sql` (additive `leaseGeneration` column with `DEFAULT 0 NOT NULL`). `pnpm db:migrate` applies them; safe to run against a live database with no downtime.
 - **Rollback**: `JOBS_ENABLED=false` (or unset) immediately stops all new enqueue/processing behavior — everything currently integrated (the audit-log write in `src/lib/auth.ts`) reverts to its pre-existing direct-write behavior with no code change. The `tls_jobs` table can be left in place (inert) or dropped (`DROP TABLE tls_jobs;`) independently, since nothing else references it via a foreign key.
 - **Compatibility**: the table is new, so there's no existing-data migration to reason about. The one integrated call site (audit-log write) is behind the same flag, so its behavior is unchanged unless an operator opts in.
 

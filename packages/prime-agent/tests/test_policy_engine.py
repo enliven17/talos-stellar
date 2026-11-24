@@ -11,8 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from talos_agent.policy.engine import PolicyEngine, _evaluate_condition, _all_conditions_match
-from talos_agent.policy.loader import PolicyLoader, _build_default_policies, _load_from_file
+from talos_agent.policy.engine import (
+    PolicyEngine,
+    PolicyReloadError,
+    _evaluate_condition,
+    _all_conditions_match,
+)
+from talos_agent.policy.loader import (
+    PolicyLoadError,
+    PolicyLoader,
+    _build_default_policies,
+    _load_from_file,
+)
 from talos_agent.policy.middleware import (
     PolicyMiddleware,
     PolicyViolationError,
@@ -274,6 +284,28 @@ class TestPolicyEngine:
         result = engine.evaluate(ActionSpec("purchase_service", {"price": 100}))
         assert result.decision == PolicyDecision.APPROVE
 
+    def test_unknown_action_category_is_denied_with_reason(self, engine):
+        engine.enabled = True
+        engine.load([])
+
+        result = engine.evaluate(ActionSpec("unregistered_action", {}))
+
+        assert result.decision == PolicyDecision.DENY
+        assert result.evidence == (
+            "Unknown policy action category: unregistered_action; action denied.",
+        )
+        assert result.trace is not None
+        assert result.trace.summary == result.evidence[0]
+
+    def test_unknown_action_category_is_denied_when_engine_disabled(self, engine):
+        engine.enabled = False
+        engine.load([])
+
+        result = engine.evaluate(ActionSpec("unregistered_action", {}))
+
+        assert result.decision == PolicyDecision.DENY
+        assert "Unknown policy action category" in result.evidence[0]
+
     def test_load_sorts_by_priority(self, engine):
         p1 = Policy(name="low", priority=1)
         p2 = Policy(name="high", priority=100)
@@ -290,6 +322,61 @@ class TestPolicyEngine:
         assert engine._policies[0].name == "a-policy"
         assert engine._policies[1].name == "z-policy"
 
+    def test_reload_preserves_snapshot_when_candidate_is_invalid(self, engine):
+        previous = Policy(
+            name="previous",
+            rules=(
+                PolicyRule(
+                    rule_id="block-sensitive",
+                    description="Keep blocking sensitive actions",
+                    conditions=(MatchCondition("action", "eq", "sensitive"),),
+                    decision=PolicyDecision.DENY,
+                    severity=Severity.BLOCKER,
+                    reason="Sensitive action blocked",
+                ),
+            ),
+        )
+        engine.enabled = True
+        engine.load([Policy(name="initial")])
+        engine.reload([previous])
+        active_snapshot = engine.policies
+        assert engine.policies[0].name == "previous"
+        before = engine.evaluate(ActionSpec("sensitive"))
+        assert before.decision == PolicyDecision.DENY
+
+        invalid_candidate = Policy(
+            name="invalid",
+            rules=(
+                PolicyRule(
+                    rule_id="invalid-regex",
+                    description="Invalid regex",
+                    conditions=(MatchCondition("action", "regex", "["),),
+                ),
+            ),
+        )
+        with pytest.raises(PolicyReloadError, match="invalid regex"):
+            engine.reload([invalid_candidate])
+
+        assert engine.policies is active_snapshot
+        after = engine.evaluate(ActionSpec("sensitive"))
+        assert after.decision == before.decision
+        assert after.violated_rules == before.violated_rules
+
+    def test_reload_simulates_candidate_before_replacing_snapshot(
+        self, engine, monkeypatch
+    ):
+        active = [Policy(name="active")]
+        engine.load(active)
+        active_snapshot = engine.policies
+
+        def fail_simulation(self, action, params=None, context=None):
+            raise RuntimeError("simulation failed")
+
+        monkeypatch.setattr(PolicySimulator, "simulate", fail_simulation)
+        with pytest.raises(PolicyReloadError, match="simulation failed"):
+            engine.reload([Policy(name="candidate")])
+
+        assert engine.policies is active_snapshot
     def test_load_rejects_duplicate_rule_ids_before_installing(self, engine):
         original = Policy(name="original", rules=(PolicyRule("stable-id", "first"),))
         duplicate = Policy(name="override", rules=(PolicyRule("stable-id", "second"),))
@@ -345,7 +432,7 @@ class TestPolicyEngine:
     def test_disabled_policy_skipped(self, engine, sample_policies):
         engine.enabled = True
         engine.load(sample_policies)
-        spec = ActionSpec("anything", {})
+        spec = ActionSpec("purchase_service", {})
         result = engine.evaluate(spec)
         # Disabled policy should be skipped
         assert result.decision == PolicyDecision.APPROVE
@@ -355,6 +442,14 @@ class TestPolicyEngine:
         engine.load(sample_policies)
         spec = ActionSpec("discover_services", {})
         result = engine.evaluate(spec)
+        assert result.decision == PolicyDecision.APPROVE
+
+    def test_registered_action_without_policy_category_remains_supported(self, engine):
+        engine.enabled = True
+        engine.load([])
+
+        result = engine.evaluate(ActionSpec("report_activity", {}))
+
         assert result.decision == PolicyDecision.APPROVE
 
     def test_result_includes_evidence(self, engine, sample_policies):
@@ -553,11 +648,11 @@ class TestPolicyLoader:
         assert "policies" in raw
         assert len(raw["policies"]) > 0
 
-    def test_load_from_file_invalid_json(self, tmp_path: Path):
+    def test_load_from_file_invalid_json_fails(self, tmp_path: Path):
         path = tmp_path / "bad.json"
         path.write_text("not json")
-        result = _load_from_file(path)
-        assert result == []
+        with pytest.raises(PolicyLoadError, match="Unable to load policy file"):
+            _load_from_file(path)
 
     def test_load_from_file_valid(self, tmp_path: Path):
         path = tmp_path / "good.json"
@@ -658,6 +753,37 @@ class TestPolicyMiddleware:
         assert called
         assert result == {"services": []}
 
+    def test_wrap_tool_registered_compat_action_still_executes(self, middleware):
+        called = False
+
+        async def mock_report():
+            nonlocal called
+            called = True
+            return {"status": "ok"}
+
+        import asyncio
+        wrapped = middleware.wrap_tool("report_activity", mock_report)
+        result = asyncio.run(wrapped())
+
+        assert called
+        assert result == {"status": "ok"}
+
+    def test_wrap_tool_unknown_action_category_is_denied(self, middleware):
+        called = False
+
+        async def mock_unknown():
+            nonlocal called
+            called = True
+            return {"status": "ok"}
+
+        import asyncio
+        wrapped = middleware.wrap_tool("future_unregistered_action", mock_unknown)
+        result = asyncio.run(wrapped())
+
+        assert not called
+        assert result["policy_decision"] == "deny"
+        assert "Unknown policy action category" in result["evidence"][0]
+
     def test_wrap_tool_gated_action_approve(self, middleware):
         """Gated actions with passing policy should proceed."""
         called = False
@@ -706,6 +832,64 @@ class TestPolicyMiddleware:
         assert "deny" in str(error).lower()
         assert "Test block" in str(error)
 
+    def test_hot_reload_keeps_active_snapshot_after_invalid_candidate(
+        self, engine, tmp_path: Path, monkeypatch
+    ):
+        from talos_agent.policy.loader import PolicyLoader
+
+        policy_file = tmp_path / "policies.json"
+        policy_file.write_text(json.dumps({
+            "policies": [{
+                "name": "invalid",
+                "rules": [{
+                    "rule_id": "invalid-regex",
+                    "conditions": [
+                        {"field": "action", "operator": "regex", "value": "["}
+                    ],
+                    "decision": "deny",
+                    "severity": "blocker",
+                    "reason": "Invalid candidate",
+                }],
+            }]
+        }))
+        monkeypatch.setattr(
+            "talos_agent.policy.loader._policies_file_path",
+            lambda: policy_file,
+        )
+
+        previous = Policy(
+            name="previous",
+            rules=(
+                PolicyRule(
+                    rule_id="block-sensitive",
+                    description="Keep blocking sensitive actions",
+                    conditions=(MatchCondition("action", "eq", "sensitive"),),
+                    decision=PolicyDecision.DENY,
+                    severity=Severity.BLOCKER,
+                    reason="Sensitive action blocked",
+                ),
+            ),
+        )
+        engine.enabled = True
+        engine.load([previous])
+        active_snapshot = engine.policies
+        loader = PolicyLoader(db=None)
+        middleware = PolicyMiddleware(engine, loader)
+
+        assert middleware.hot_reload() is False
+        assert engine.policies is active_snapshot
+        assert engine.evaluate(ActionSpec("sensitive")).decision == PolicyDecision.DENY
+        assert loader.needs_reload() is True
+        assert loader._cached is None
+
+        policy_file.write_text(json.dumps({"policies": [{"name": "recovered"}]}))
+        assert middleware.hot_reload() is True
+        assert "recovered" in {policy.name for policy in engine.policies}
+        assert {policy.name for policy in loader._cached} == {
+            policy.name for policy in engine.policies
+        }
+        assert loader.needs_reload() is False
+
 
 # ── PolicySimulator tests ─────────────────────────────────────────────────────
 
@@ -737,6 +921,12 @@ class TestPolicySimulator:
             {"budget_remaining": 100},
         )
         assert result.decision == PolicyDecision.ESCALATE
+
+    def test_simulate_unknown_action_returns_explicit_deny(self, sim):
+        result = sim.simulate("unregistered_action")
+
+        assert result.decision == PolicyDecision.DENY
+        assert "Unknown policy action category" in result.evidence[0]
 
     def test_simulate_batch(self, sim):
         scenarios = [
