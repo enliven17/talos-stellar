@@ -369,7 +369,7 @@ pub fn compute_expires_at(env: &Env, is_admin: bool, duration: u64) -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, Env};
+    use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, Address, Env};
 
     fn setup() -> Env {
         Env::default()
@@ -440,7 +440,9 @@ mod tests {
     #[should_panic(expected = "Proposal expired")]
     fn validate_executable_rejects_expired_proposal() {
         let env = setup();
-        // eta = 0, grace_period = 0 → already expired.
+        // eta = 0, grace_period = 0 → the window is [0, 0]; one second later
+        // it has expired. (At the default timestamp 0 it is still executable.)
+        env.ledger().set_timestamp(1);
         validate_executable(&env, 0, 0);
     }
 

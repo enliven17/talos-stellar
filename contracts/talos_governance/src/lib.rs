@@ -251,8 +251,6 @@ pub const MAX_DESCRIPTION_LEN: u32 = 2048;
 
 /// Typed errors for governance metadata validation.
 #[contracttype]
-/// Typed errors for governance metadata validation.
-#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GovernanceMetadataError {
     /// Proposal title exceeds `MAX_TITLE_LEN` bytes.
