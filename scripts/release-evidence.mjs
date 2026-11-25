@@ -29,7 +29,7 @@ function parsePair(value, label) {
 }
 
 async function readArtifact(root, relativePath) {
-  if (!relativePath || path.isAbsolute(relativePath)) {
+  if (!relativePath || path.isAbsolute(relativePath) || /^[a-z]:[\\/]/i.test(relativePath) || relativePath.startsWith("\\\\")) {
     throw new Error(`Artifact path must be relative to the repository: ${relativePath}`);
   }
   const normalized = path.posix.normalize(relativePath.replaceAll("\\", "/"));
