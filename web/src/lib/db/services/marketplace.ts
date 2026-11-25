@@ -29,7 +29,8 @@ export async function searchMarketplaceItems(
   query: string,
   capabilityIds: string[],
   page: number,
-  limit: number
+  limit: number,
+  capabilityFilters?: CapabilityFilter[],
 ): Promise<MarketplaceSearchResponse> {
   try {
     const offset = (page - 1) * limit;
@@ -84,7 +85,7 @@ export async function searchMarketplaceItems(
       totalCount = Number(countResult[0]?.count ?? 0);
     }
 
-    const capabilitiesList = await getCapabilityFilters();
+    const capabilitiesList = capabilityFilters ?? (await getCapabilityFilters());
 
     const mappedResults: MarketplaceSearchResult[] = results.map((item) => ({
       id: item.id,

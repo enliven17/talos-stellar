@@ -124,12 +124,13 @@ describe("Marketplace Search API & Service", () => {
 
   describe("Capability filter search", () => {
     it("filters items by capability ID", async () => {
-      // 1: itemIds, 2: items by id, 3: count, 4: capabilities list
+      // 1: capabilities list (validation, reused for filters), 2: itemIds,
+      // 3: items by id, 4: count
       mockDbResponses([
+        [mockCapability],
         [{ id: "item-uuid-1" }],
         [mockItem],
         [{ count: 1 }],
-        [mockCapability],
       ]);
 
       const request = req({ capabilities: JSON.stringify(["cap-uuid-1"]) });
@@ -141,13 +142,16 @@ describe("Marketplace Search API & Service", () => {
       expect(data.total).toBe(1);
       expect(data.results).toHaveLength(1);
       expect(data.results[0].id).toBe("item-uuid-1");
+      expect(data.filters.capabilities).toHaveLength(1);
+      // The capability vocabulary is fetched once, not again for `filters`.
+      expect(mocks.mockDb.select).toHaveBeenCalledTimes(4);
     });
 
-    it("handles capability filter when no item matches the capability", async () => {
-      // 1: itemIds empty, 2: capabilities list
-      mockDbResponses([[], [mockCapability]]);
+    it("returns an ordinary empty list when a supported capability matches no items", async () => {
+      // 1: capabilities list, 2: itemIds empty
+      mockDbResponses([[mockCapability], []]);
 
-      const request = req({ capabilities: JSON.stringify(["cap-nonexistent"]) });
+      const request = req({ capabilities: JSON.stringify(["cap-uuid-1"]) });
       const response = await GET(request);
 
       expect(response.status).toBe(200);
@@ -156,6 +160,75 @@ describe("Marketplace Search API & Service", () => {
       expect(data.total).toBe(0);
       expect(data.results).toEqual([]);
       expect(data.filters.capabilities).toHaveLength(1);
+      expect(data).not.toHaveProperty("code");
+    });
+
+    it("returns a typed unsupported_capability result for an unknown capability", async () => {
+      // Before #1357 this was a 200 with an empty list, indistinguishable from
+      // "no matches". Now it is a typed validation result and no search runs.
+      mockDbResponses([[mockCapability]]);
+
+      const request = req({ capabilities: JSON.stringify(["cap-nonexistent"]) });
+      const response = await GET(request);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: "Unsupported capability filter: cap-nonexistent",
+        code: "unsupported_capability",
+        field: "capabilities",
+        fieldErrors: { capabilities: "Unsupported capability filter: cap-nonexistent" },
+        unsupportedCapabilities: ["cap-nonexistent"],
+      });
+      expect(mocks.mockDb.select).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports only the unsupported IDs when supported and unsupported capabilities are mixed", async () => {
+      mockDbResponses([[mockCapability]]);
+
+      const request = req({ capabilities: "cap-uuid-1,cap-retired" });
+      const response = await GET(request);
+
+      expect(response.status).toBe(400);
+      const data = await response.json();
+      expect(data.code).toBe("unsupported_capability");
+      expect(data.unsupportedCapabilities).toEqual(["cap-retired"]);
+    });
+
+    it("treats a capability that is no longer active as unsupported", async () => {
+      // getCapabilityFilters only returns active capabilities.
+      mockDbResponses([[]]);
+
+      const response = await GET(req({ capabilities: JSON.stringify(["cap-uuid-1"]) }));
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).unsupportedCapabilities).toEqual(["cap-uuid-1"]);
+    });
+
+    it("returns a typed invalid_filter result for a malformed capability filter without querying", async () => {
+      for (const capabilities of ['{"id":"cap-uuid-1"}', "[1,2]", "[not json"]) {
+        mockDbResponses([]);
+        const response = await GET(req({ capabilities }));
+
+        expect(response.status).toBe(400);
+        const data = await response.json();
+        expect(data.code).toBe("invalid_filter");
+        expect(data.field).toBe("capabilities");
+        expect(data.fieldErrors.capabilities).toBe(data.error);
+        expect(mocks.mockDb.select).not.toHaveBeenCalled();
+      }
+    });
+
+    it("treats an empty capability array as no filter (no validation query)", async () => {
+      // 1: results, 2: count, 3: capabilities list for `filters`
+      mockDbResponses([[mockItem], [{ count: 1 }], [mockCapability]]);
+
+      const response = await GET(req({ capabilities: "[]" }));
+
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      expect(data.total).toBe(1);
+      expect(data.filters.capabilities).toHaveLength(1);
+      expect(mocks.mockDb.select).toHaveBeenCalledTimes(3);
     });
   });
 
