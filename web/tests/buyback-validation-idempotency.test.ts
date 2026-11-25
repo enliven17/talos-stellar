@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Validation + idempotency tests for POST /api/talos/[id]/revenue/buyback
  *
