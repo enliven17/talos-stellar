@@ -80,6 +80,7 @@ export async function buildEvidenceBundle({
   }
 
   const statuses = new Map();
+  const seenResults = new Set();
   for (const id of requiredChecks) {
     assertCheckId(id);
     if (statuses.has(id)) throw new Error(`Duplicate required check: ${id}`);
@@ -90,9 +91,8 @@ export async function buildEvidenceBundle({
     if (!["passed", "failed", "not-run"].includes(result.status)) {
       throw new Error(`Invalid status for check ${result.id}: ${result.status}`);
     }
-    if (statuses.has(result.id) && !requiredChecks.includes(result.id)) {
-      throw new Error(`Duplicate check result: ${result.id}`);
-    }
+    if (seenResults.has(result.id)) throw new Error(`Duplicate check result: ${result.id}`);
+    seenResults.add(result.id);
     statuses.set(result.id, result.status);
   }
 
