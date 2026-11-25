@@ -45,7 +45,8 @@ test("rejects environment files and secret-bearing artifact content", async (t) 
   const root = await fixture(t);
   await writeFile(path.join(root, ".env.production"), "PRIVATE_TOKEN=not-for-export\n");
   await mkdir(path.join(root, "reports"));
-  await writeFile(path.join(root, "reports", "leak.txt"), "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\n");
+  const fakeToken = ["ghp", "x".repeat(32)].join("_");
+  await writeFile(path.join(root, "reports", "leak.txt"), `GITHUB_TOKEN=${fakeToken}\n`);
 
   await assert.rejects(
     buildEvidenceBundle({ root, baselineRevision: REVISION, artifactPaths: [".env.production"] }),
