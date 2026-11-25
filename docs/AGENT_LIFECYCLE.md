@@ -108,6 +108,31 @@ Request bodies are capped at 16 KiB. The signed message must contain the agent
 id, which prevents a signature collected for one agent from being replayed
 against another.
 
+### Lifecycle reasons
+
+`reason` (on `pause`, `retire` and `recover` payloads, and on
+`POST /api/talos/:id/retire`) is validated before anything is persisted or
+written to the lifecycle audit trail. A request that fails is rejected whole;
+the reason is never trimmed or truncated, so an identifier quoted in it is
+either stored intact or not stored at all, and an idempotent retire retry still
+compares equal to the stored reason.
+
+| Rule | `POST /lifecycle` payloads | `POST /retire` |
+|---|---|---|
+| Maximum length (Unicode characters / code points) | 500 (`LIFECYCLE_REASON_MAX_LENGTH`) | 1000 (`RETIREMENT_REASON_MAX_LENGTH`) |
+| Blank / whitespace-only | rejected | rejected |
+| Control characters (except tab, LF, CR), NUL, DEL, unpaired surrogates | rejected | rejected |
+| Error | `400 LIFECYCLE_INVALID_PAYLOAD`, `details.issues: ["reason: …"]` | `400 VALIDATION_ERROR`, `issues: ["reason: …"]` |
+
+Length counts code points, so an emoji or other non-BMP character counts once.
+Because control characters are rejected, every allowed code point JSON-encodes
+to at most two UTF-16 units, so a 1000-character reason encodes to at most
+2,000. That keeps the retirement audit `detail` (`reason`, `supersededBy`,
+`reconciliationJobId`) under the 4,096-unit event detail cap, which would
+otherwise replace the whole detail with `{ truncated: true }`, so its
+identifiers are never dropped. Error messages state the limit and the submitted length but
+never echo the submitted text.
+
 ## 3. Durable provisioning
 
 Approved `activate` / `retire` / `recover` become a row in

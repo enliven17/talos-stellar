@@ -240,6 +240,146 @@ export class LifecycleError extends Error {
   }
 }
 
+// ── Reasons ──────────────────────────────────────────────────────────
+
+/**
+ * Lifecycle reasons are owner/operator free text. They are persisted (for
+ * example `tls_talos.retiredReason`) and copied into the lifecycle audit trail,
+ * so they are validated before either happens.
+ *
+ * A reason is never truncated or rewritten: it is stored exactly as sent or
+ * rejected whole. A reason that names an agent, proposal, or job identifier
+ * therefore can never be cut mid-identifier, and a retried request compares
+ * equal to the stored reason.
+ *
+ * Length is counted in Unicode code points (what a person sees as characters),
+ * so non-Latin text and emoji are not penalised twice by UTF-16 encoding.
+ * Because control characters are rejected, each allowed code point JSON-encodes
+ * to at most two UTF-16 units, so a reason at the largest bound encodes to at
+ * most 2,000. That keeps a retirement audit detail (`reason` + identifiers)
+ * under the 4,096-unit event detail cap in `events.ts`, which would otherwise
+ * replace the whole detail (identifiers included) with `{ truncated: true }`.
+ */
+
+/** Max reason length for governed transitions (`POST /api/talos/:id/lifecycle`). */
+export const LIFECYCLE_REASON_MAX_LENGTH = 500;
+
+/** Max reason length for `POST /api/talos/:id/retire` (its long-standing limit). */
+export const RETIREMENT_REASON_MAX_LENGTH = 1000;
+
+export type LifecycleReasonIssue = "not_a_string" | "blank" | "invalid_characters" | "too_long";
+
+export type LifecycleReasonCheck =
+  | { ok: true; reason: string; length: number }
+  | {
+      ok: false;
+      issue: LifecycleReasonIssue;
+      /** Safe to return to clients: never echoes the submitted value. */
+      message: string;
+      maxLength: number;
+      /** Code-point length of the submitted string, or null if not a string. */
+      length: number | null;
+    };
+
+/** Number of Unicode code points in `value`. */
+export function countReasonCharacters(value: string): number {
+  let count = 0;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    // A surrogate pair is one code point.
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) i++;
+    }
+    count++;
+  }
+  return count;
+}
+
+/**
+ * C0 controls other than tab/LF/CR, DEL, and unpaired UTF-16 surrogates.
+ * NUL in particular is rejected by Postgres `text` columns, so without this
+ * check such a reason fails at persistence time with a 500.
+ */
+function hasInvalidReasonCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f) {
+      return true;
+    }
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      i++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Validate a lifecycle reason without modifying it. Checks run in a fixed
+ * order: type, blank (whitespace only), invalid characters, then length.
+ */
+export function checkLifecycleReason(
+  value: unknown,
+  maxLength: number = LIFECYCLE_REASON_MAX_LENGTH,
+): LifecycleReasonCheck {
+  if (typeof value !== "string") {
+    return {
+      ok: false,
+      issue: "not_a_string",
+      message: "reason must be a string",
+      maxLength,
+      length: null,
+    };
+  }
+  const length = countReasonCharacters(value);
+  if (value.trim().length === 0) {
+    return { ok: false, issue: "blank", message: "reason must not be blank", maxLength, length };
+  }
+  if (hasInvalidReasonCharacter(value)) {
+    return {
+      ok: false,
+      issue: "invalid_characters",
+      message: "reason must not contain control characters or malformed Unicode",
+      maxLength,
+      length,
+    };
+  }
+  if (length > maxLength) {
+    return {
+      ok: false,
+      issue: "too_long",
+      message: `reason must be at most ${maxLength} characters (got ${length})`,
+      maxLength,
+      length,
+    };
+  }
+  return { ok: true, reason: value, length };
+}
+
+/**
+ * Like {@link checkLifecycleReason} but throws `LIFECYCLE_INVALID_PAYLOAD`
+ * (HTTP 400) with `{ field, issue, maxLength, length }` details.
+ */
+export function assertLifecycleReason(
+  value: unknown,
+  maxLength: number = LIFECYCLE_REASON_MAX_LENGTH,
+): string {
+  const result = checkLifecycleReason(value, maxLength);
+  if (!result.ok) {
+    throw new LifecycleError("LIFECYCLE_INVALID_PAYLOAD", result.message, {
+      field: "reason",
+      issue: result.issue,
+      maxLength: result.maxLength,
+      length: result.length,
+    });
+  }
+  return result.reason;
+}
+
 // ── Transition evaluation ────────────────────────────────────────────
 
 export interface TransitionRequest {
