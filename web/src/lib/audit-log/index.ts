@@ -1,8 +1,36 @@
 export {
   listAuditLogs,
+  getAgentAuditReviewBundle,
+  verifyAuditChainRange,
   exportAuditCheckpointBundle,
+  exportAuditLogs,
+  serializeAuditLogExport,
+  type AuditLogExport,
+  applyAuditRetention,
+  AuditRetentionConflictError,
   type ExportAuditCheckpointFilter,
+  type VerifyAuditChainRangeFilter,
+  type ApplyAuditRetentionOptions,
+  type ApplyAuditRetentionResult,
 } from "./store";
+export {
+  planAuditRetention,
+  normalizeAuditRetentionPolicy,
+  getAuditRetentionPolicy,
+  isAuditRetentionEnabled,
+  DEFAULT_AUDIT_RETENTION_MS,
+  DEFAULT_AUDIT_RETENTION_MIN_ENTRIES,
+  DEFAULT_AUDIT_RETENTION_BATCH_SIZE,
+  MAX_AUDIT_RETENTION_BATCH_SIZE,
+} from "./retention";
+export type {
+  AuditRetentionPolicy,
+  AuditRetentionPlan,
+  AuditRetentionAnchor,
+  AuditRetentionRefusalReason,
+  AuditRetentionNoopReason,
+  PlanAuditRetentionInput,
+} from "./retention";
 export {
   AuditLogFilterError,
   parseAuditLogFilters,

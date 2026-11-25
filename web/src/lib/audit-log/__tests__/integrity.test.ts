@@ -15,6 +15,8 @@ const STALE_CHECKPOINT = new Date(NOW.getTime() - 2 * 60 * 60 * 1_000).toISOStri
 function validChain(entries = 5): ChainVerificationResult {
   return {
     valid: true,
+    status: "valid",
+    missingFromSequence: null,
     totalEntries: entries,
     verifiedEntries: entries,
     brokenAtSequence: null,
@@ -25,6 +27,8 @@ function validChain(entries = 5): ChainVerificationResult {
 function brokenChain(breakAt = 3): ChainVerificationResult {
   return {
     valid: false,
+    status: "mismatch",
+    missingFromSequence: null,
     totalEntries: 5,
     verifiedEntries: breakAt,
     brokenAtSequence: breakAt,

@@ -1,6 +1,7 @@
 import {
   and,
   asc,
+  count,
   desc,
   eq,
   gte,
@@ -16,11 +17,26 @@ import { db } from "@/db";
 import { tlsApiAuditLogs } from "@/db/schema";
 import {
   clampCheckpointLimit,
+  buildAuditExportFilename,
   createAuditCheckpointBundle,
+  getChainHmacSecret,
+  getCheckpointVerificationPublicKey,
+  verifyChainRange,
+  type AuditChainPredecessor,
+  type AuditExportFormat,
   type AuditCheckpointBundle,
   type AuditCheckpointRowInput,
+  type ChainRangeVerificationResult,
 } from "@/lib/audit-chain";
 import {
+  getAuditRetentionPolicy,
+  isAuditRetentionEnabled,
+  planAuditRetention,
+  type AuditRetentionPlan,
+  type AuditRetentionPolicy,
+} from "./retention";
+import {
+  AuditLogFilterError,
   escapeIlikePattern,
   statusClassRange,
   validateAuditLogFilters,
@@ -112,6 +128,375 @@ export async function listAuditLogs(
     : null;
 
   return { logs: page.map(toRecord), nextCursor };
+}
+
+export async function getAgentAuditReviewBundle(
+  talosId: string,
+  limit: number,
+  cursor?: string,
+): Promise<{
+  auditReferences: AuditLogRecord[];
+  nextCursor: string | null;
+  checkpoint: {
+    chainRoot: string | null;
+    totalEntries: number;
+    chainVersion: string | null;
+    createdAt: string;
+  };
+}> {
+  const referenceConditions = [eq(tlsApiAuditLogs.talosId, talosId)];
+  if (cursor) referenceConditions.push(lt(tlsApiAuditLogs.createdAt, new Date(cursor)));
+
+  const [rows, latestRows, countRows] = await Promise.all([
+    db
+      .select()
+      .from(tlsApiAuditLogs)
+      .where(and(...referenceConditions))
+      .orderBy(desc(tlsApiAuditLogs.createdAt))
+      .limit(limit + 1),
+    db
+      .select({
+        entryHash: tlsApiAuditLogs.entryHash,
+        chainVersion: tlsApiAuditLogs.chainVersion,
+      })
+      .from(tlsApiAuditLogs)
+      .where(and(eq(tlsApiAuditLogs.talosId, talosId), isNotNull(tlsApiAuditLogs.entryHash)))
+      .orderBy(desc(tlsApiAuditLogs.createdAt))
+      .limit(1),
+    db
+      .select({ total: count() })
+      .from(tlsApiAuditLogs)
+      .where(and(eq(tlsApiAuditLogs.talosId, talosId), isNotNull(tlsApiAuditLogs.entryHash))),
+  ]);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const latest = latestRows[0] ?? null;
+
+  return {
+    auditReferences: page.map(toRecord),
+    nextCursor: hasMore ? page[page.length - 1]?.createdAt.toISOString() ?? null : null,
+    checkpoint: {
+      chainRoot: latest?.entryHash ?? null,
+      totalEntries: countRows[0]?.total ?? 0,
+      chainVersion: latest?.chainVersion ?? null,
+      createdAt: new Date().toISOString(),
+    },
+  };
+}
+
+const AUDIT_EXPORT_COLUMNS = [
+  "id",
+  "talosId",
+  "method",
+  "path",
+  "statusCode",
+  "denialReason",
+  "scopesRequired",
+  "ipAddress",
+  "sequenceNumber",
+  "previousHash",
+  "entryHash",
+  "chainVersion",
+  "createdAt",
+] as const satisfies ReadonlyArray<keyof AuditLogRecord>;
+
+function csvCell(value: unknown): string {
+  let text =
+    value === null || value === undefined
+      ? ""
+      : Array.isArray(value)
+        ? value.join(" ")
+        : String(value);
+  // Neutralize spreadsheet formula prefixes (CSV injection).
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Serialize audit records for export. Unicode is preserved verbatim; CSV
+ * cells are quoted and formula-prefixed cells are neutralized.
+ */
+export function serializeAuditLogExport(
+  logs: AuditLogRecord[],
+  options: {
+    format: AuditExportFormat;
+    exportedAt?: Date | string;
+    filters?: AuditLogFilters;
+    nextCursor?: string | null;
+  },
+): string {
+  if (options.format === "csv") {
+    const lines = [AUDIT_EXPORT_COLUMNS.join(",")];
+    for (const log of logs) {
+      lines.push(AUDIT_EXPORT_COLUMNS.map((col) => csvCell(log[col])).join(","));
+    }
+    return `${lines.join("\r\n")}\r\n`;
+  }
+  const exportedAt =
+    options.exportedAt instanceof Date
+      ? options.exportedAt.toISOString()
+      : options.exportedAt ?? new Date().toISOString();
+  return JSON.stringify(
+    {
+      exportedAt,
+      filters: options.filters ?? {},
+      nextCursor: options.nextCursor ?? null,
+      logs,
+    },
+    null,
+    2,
+  );
+}
+
+export interface AuditLogExport {
+  filename: string;
+  contentDisposition: string;
+  contentType: string;
+  data: string;
+}
+
+/**
+ * Export a filtered page of audit records as JSON or CSV with a bounded,
+ * header-safe filename (see `buildAuditExportFilename`). Pass `logs` when the
+ * caller already fetched the page; otherwise it is queried with the filters.
+ */
+export async function exportAuditLogs(
+  filter: AuditLogFilters,
+  options: {
+    format: AuditExportFormat;
+    exportedAt?: Date;
+    logs?: AuditLogRecord[];
+    nextCursor?: string | null;
+  },
+): Promise<AuditLogExport> {
+  const exportedAt = options.exportedAt ?? new Date();
+  let logs = options.logs;
+  let nextCursor = options.nextCursor ?? null;
+  if (logs === undefined) {
+    const page = await listAuditLogs(filter);
+    logs = page.logs;
+    nextCursor = page.nextCursor;
+  }
+
+  const filename = buildAuditExportFilename({
+    talosId: filter.talosId,
+    format: options.format,
+    exportedAt,
+  });
+
+  return {
+    filename,
+    contentDisposition: `attachment; filename="${filename}"`,
+    contentType:
+      options.format === "csv" ? "text/csv; charset=utf-8" : "application/json; charset=utf-8",
+    data: serializeAuditLogExport(logs, {
+      format: options.format,
+      exportedAt,
+      filters: filter,
+      nextCursor,
+    }),
+  };
+}
+
+export interface VerifyAuditChainRangeFilter {
+  talosId: string;
+  /** Inclusive lower timestamp bound (ISO-8601). */
+  from?: string;
+  /** Inclusive upper timestamp bound (ISO-8601). */
+  to?: string;
+  /** Maximum entries to verify (clamped to `[1, 10000]`, default 1000). */
+  limit?: number;
+}
+
+const chainRowColumns = {
+  sequenceNumber: tlsApiAuditLogs.sequenceNumber,
+  entryHash: tlsApiAuditLogs.entryHash,
+  previousHash: tlsApiAuditLogs.previousHash,
+  chainVersion: tlsApiAuditLogs.chainVersion,
+  talosId: tlsApiAuditLogs.talosId,
+  method: tlsApiAuditLogs.method,
+  path: tlsApiAuditLogs.path,
+  statusCode: tlsApiAuditLogs.statusCode,
+  ipAddress: tlsApiAuditLogs.ipAddress,
+  createdAt: tlsApiAuditLogs.createdAt,
+};
+
+/**
+ * Verify an agent's audit chain over an inclusive `[from, to]` time window.
+ *
+ * When `from` is set, the last chained entry strictly before it is fetched as
+ * the predecessor boundary, so a mid-chain window verifies as complete. A
+ * window truncated by `limit` is reported as incomplete, never as valid.
+ */
+export async function verifyAuditChainRange(
+  filter: VerifyAuditChainRangeFilter,
+): Promise<ChainRangeVerificationResult> {
+  const limit = Math.min(Math.max(Math.floor(Number(filter.limit) || 1000), 1), 10000);
+  const fromDate = filter.from !== undefined ? new Date(filter.from) : null;
+  const toDate = filter.to !== undefined ? new Date(filter.to) : null;
+
+  const base = [eq(tlsApiAuditLogs.talosId, filter.talosId), isNotNull(tlsApiAuditLogs.entryHash)];
+
+  let predecessor: AuditChainPredecessor | null = null;
+  if (fromDate !== null) {
+    const predecessorRows = await db
+      .select({
+        sequenceNumber: tlsApiAuditLogs.sequenceNumber,
+        entryHash: tlsApiAuditLogs.entryHash,
+        createdAt: tlsApiAuditLogs.createdAt,
+      })
+      .from(tlsApiAuditLogs)
+      .where(and(...base, lt(tlsApiAuditLogs.createdAt, fromDate)))
+      .orderBy(desc(tlsApiAuditLogs.createdAt), desc(tlsApiAuditLogs.sequenceNumber))
+      .limit(1);
+    predecessor = predecessorRows[0] ?? null;
+  }
+
+  const conditions = [...base];
+  if (fromDate !== null) conditions.push(gte(tlsApiAuditLogs.createdAt, fromDate));
+  if (toDate !== null) conditions.push(lte(tlsApiAuditLogs.createdAt, toDate));
+
+  const rows = await db
+    .select(chainRowColumns)
+    .from(tlsApiAuditLogs)
+    .where(and(...conditions))
+    .orderBy(asc(tlsApiAuditLogs.createdAt), asc(tlsApiAuditLogs.sequenceNumber))
+    .limit(limit + 1);
+
+  const truncated = rows.length > limit;
+  const page = truncated ? rows.slice(0, limit) : rows;
+
+  return verifyChainRange(page, {
+    predecessor,
+    from: fromDate,
+    to: toDate,
+    truncated,
+  });
+}
+
+export interface ApplyAuditRetentionOptions {
+  talosId: string;
+  /**
+   * Signed checkpoint bundle (from `exportAuditCheckpointBundle`) that closes
+   * the range to prune. Keep it: it is the signed proof of the pruned entries.
+   */
+  checkpoint: unknown;
+  /** Policy overrides; defaults come from `AUDIT_RETENTION_*` env vars. */
+  policy?: Partial<AuditRetentionPolicy>;
+  /** Plan only; never delete. Allowed even when retention is disabled. */
+  dryRun?: boolean;
+  /** Current time (injected for testability). */
+  now?: Date;
+  /** HMAC secret for checkpoint verification (defaults to `AUDIT_HASH_CHAIN_SECRET`). */
+  hmacSecret?: string | null;
+  /** Ed25519 public key for checkpoint verification (defaults to `AUDIT_CHECKPOINT_PUBLIC_KEY`). */
+  publicKey?: string | KeyObject | null;
+}
+
+export interface ApplyAuditRetentionResult {
+  plan: AuditRetentionPlan;
+  /** Rows actually deleted (0 for dry runs, no-ops, refusals, or when disabled). */
+  deleted: number;
+  dryRun: boolean;
+  /** Whether `AUDIT_RETENTION_ENABLED` is on; when off, nothing is ever deleted. */
+  enabled: boolean;
+}
+
+/** Thrown when the delete would remove a different row set than was verified. */
+export class AuditRetentionConflictError extends Error {
+  constructor(expected: number, actual: number) {
+    super(`Audit retention aborted: expected to prune ${expected} rows, matched ${actual}`);
+    this.name = "AuditRetentionConflictError";
+  }
+}
+
+/**
+ * Prune an agent's oldest audit entries under the retention policy while
+ * preserving checkpoint continuity (see `./retention`).
+ *
+ * Only a verified, closed range covered by a signed checkpoint is deleted, the
+ * anchor (predecessor of the surviving chain) is always kept, and legacy
+ * unchained rows are never touched. The delete runs in a transaction and is
+ * rolled back unless it removes exactly the verified row set.
+ */
+export async function applyAuditRetention(
+  options: ApplyAuditRetentionOptions,
+): Promise<ApplyAuditRetentionResult> {
+  const talosId = options.talosId?.trim();
+  if (!talosId) {
+    throw new Error("talosId is required to apply audit retention");
+  }
+  const dryRun = options.dryRun ?? false;
+  const enabled = isAuditRetentionEnabled();
+  const policy = { ...getAuditRetentionPolicy(), ...options.policy };
+  const now = options.now ?? new Date();
+
+  const chained = [
+    eq(tlsApiAuditLogs.talosId, talosId),
+    isNotNull(tlsApiAuditLogs.entryHash),
+    isNotNull(tlsApiAuditLogs.sequenceNumber),
+  ];
+
+  const latestRows = await db
+    .select({ sequenceNumber: tlsApiAuditLogs.sequenceNumber })
+    .from(tlsApiAuditLogs)
+    .where(and(...chained))
+    .orderBy(desc(tlsApiAuditLogs.sequenceNumber))
+    .limit(1);
+  const latestSequence = latestRows[0]?.sequenceNumber ?? null;
+
+  // Oldest entries first, enough to cover a full batch plus the anchor.
+  const batch = Math.max(1, Math.floor(Number(policy.maxPruneBatch) || 1));
+  const rows = await db
+    .select(chainRowColumns)
+    .from(tlsApiAuditLogs)
+    .where(and(...chained))
+    .orderBy(asc(tlsApiAuditLogs.sequenceNumber))
+    .limit(batch + 1);
+
+  const plan = planAuditRetention({
+    talosId,
+    rows,
+    latestSequence,
+    checkpoint: options.checkpoint,
+    checkpointVerification: {
+      hmacSecret: options.hmacSecret !== undefined ? options.hmacSecret : getChainHmacSecret(),
+      publicKey:
+        options.publicKey !== undefined ? options.publicKey : getCheckpointVerificationPublicKey(),
+    },
+    policy,
+    now,
+  });
+
+  if (plan.action !== "prune" || dryRun || !enabled) {
+    return { plan, deleted: 0, dryRun, enabled };
+  }
+
+  const from = plan.pruneFromSequence as number;
+  const through = plan.pruneThroughSequence as number;
+  const expected = plan.pruneCount;
+
+  const deleted = await db.transaction(async (tx) => {
+    const removed = await tx
+      .delete(tlsApiAuditLogs)
+      .where(
+        and(
+          ...chained,
+          gte(tlsApiAuditLogs.sequenceNumber, from),
+          lte(tlsApiAuditLogs.sequenceNumber, through),
+          lte(tlsApiAuditLogs.createdAt, new Date(plan.cutoff)),
+        ),
+      )
+      .returning({ id: tlsApiAuditLogs.id });
+    if (removed.length !== expected) {
+      // Throwing rolls the transaction back: nothing is pruned.
+      throw new AuditRetentionConflictError(expected, removed.length);
+    }
+    return removed.length;
+  });
+
+  return { plan, deleted, dryRun, enabled };
 }
 
 export interface ExportAuditCheckpointFilter {

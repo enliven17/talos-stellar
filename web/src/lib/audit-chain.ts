@@ -157,7 +157,7 @@ export interface AuditChainRow {
 export interface AuditChainPredecessor {
   sequenceNumber: number | null;
   entryHash: string | null;
-  createdAt?: Date;
+  createdAt?: Date | string;
 }
 
 export interface VerifyChainRangeOptions {
@@ -325,6 +325,191 @@ export function verifyChain(rows: ChainRow[]): ChainVerificationResult {
   };
 }
 
+export interface ChainRangeVerificationResult {
+  /** True only when the range is complete and every link verifies. */
+  valid: boolean;
+  /**
+   *   - "valid":      the range is complete and every link verifies.
+   *   - "incomplete": evidence is missing (no predecessor for a non-genesis
+   *                   range, or the range was truncated by a query limit).
+   *   - "broken":     contradictory evidence (hash/linkage/order mismatch).
+   */
+  status: ChainVerificationStatus;
+  /** True when the range is fully evidenced end to end (status "valid"). */
+  complete: boolean;
+  /** Why the range is incomplete, or null when it is not. */
+  incompleteReason: "missing_predecessor" | "truncated_range" | null;
+  /** Classification of the first failure, or null when valid. */
+  failureReason: ChainFailureReason | null;
+  totalEntries: number;
+  verifiedEntries: number;
+  /** Sequence number where contradictory evidence was found, or null. */
+  brokenAtSequence: number | null;
+  chainVersion: string | null;
+  startSequence: number | null;
+  endSequence: number | null;
+  predecessorSequence: number | null;
+  predecessorHash: string | null;
+}
+
+function toOptionalTime(value: Date | string | null | undefined): number | null {
+  if (value === undefined || value === null) return null;
+  const ms = (value instanceof Date ? value : new Date(value)).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Verify a bounded slice of an agent's audit chain (e.g. a selected time
+ * window) against its immediate predecessor.
+ *
+ * Unlike {@link verifyChain}, the slice does not need to start at genesis:
+ * the first row is linked to `options.predecessor`. Missing evidence (an
+ * omitted or absent predecessor for a non-genesis slice, or a slice truncated
+ * by a query limit) is reported as `"incomplete"`; contradictory evidence
+ * (hash, linkage, sequence, ordering or window violations) is reported as
+ * `"broken"` with the offending sequence number. Internal links are always
+ * verified, even when the predecessor is missing.
+ */
+export function verifyChainRange(
+  rows: AuditChainRow[],
+  options: VerifyChainRangeOptions = {},
+): ChainRangeVerificationResult {
+  const chained = rows.filter(
+    (row) =>
+      row.sequenceNumber !== null &&
+      !!row.entryHash &&
+      !!row.previousHash &&
+      !!row.chainVersion,
+  ) as Array<AuditChainRow & { sequenceNumber: number; entryHash: string; previousHash: string; chainVersion: string }>;
+
+  const predecessor = options.predecessor;
+  const hasPredecessor =
+    predecessor !== undefined &&
+    predecessor !== null &&
+    predecessor.sequenceNumber !== null &&
+    !!predecessor.entryHash;
+  const fromMs = toOptionalTime(options.from);
+  const toMs = toOptionalTime(options.to);
+
+  const first = chained[0] ?? null;
+  const last = chained[chained.length - 1] ?? null;
+  let verifiedCount = 0;
+
+  const base = () => ({
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    chainVersion: last?.chainVersion ?? null,
+    startSequence: first?.sequenceNumber ?? null,
+    endSequence: last?.sequenceNumber ?? null,
+    predecessorSequence: hasPredecessor ? (predecessor!.sequenceNumber as number) : null,
+    predecessorHash: hasPredecessor ? (predecessor!.entryHash as string) : null,
+  });
+
+  const broken = (reason: ChainFailureReason, seq: number): ChainRangeVerificationResult => ({
+    valid: false,
+    status: "broken",
+    complete: false,
+    incompleteReason: null,
+    failureReason: reason,
+    brokenAtSequence: seq,
+    ...base(),
+  });
+
+  let missingPredecessor = false;
+  let prev: (typeof chained)[number] | null = null;
+
+  for (const row of chained) {
+    const seq = row.sequenceNumber;
+    const createdMs = row.createdAt.getTime();
+
+    // Rows outside the selected window, or out of chronological / sequence
+    // order, contradict the requested range.
+    if ((fromMs !== null && createdMs < fromMs) || (toMs !== null && createdMs > toMs)) {
+      return broken("out_of_order_records", seq);
+    }
+    if (prev !== null && (createdMs < prev.createdAt.getTime() || seq < prev.sequenceNumber)) {
+      return broken("out_of_order_records", seq);
+    }
+
+    if (prev === null) {
+      // First row: link to the predecessor boundary.
+      if (row.previousHash === GENESIS_HASH && (seq !== 0 || hasPredecessor)) {
+        return broken("unexpected_genesis", seq);
+      }
+      if (hasPredecessor) {
+        if (
+          seq !== (predecessor!.sequenceNumber as number) + 1 ||
+          row.previousHash !== predecessor!.entryHash
+        ) {
+          return broken("predecessor_mismatch", seq);
+        }
+      } else if (seq === 0) {
+        if (row.previousHash !== GENESIS_HASH) {
+          return broken("previous_hash_mismatch", seq);
+        }
+      } else {
+        // Non-genesis slice without a known predecessor: evidence is missing,
+        // not contradictory. Keep verifying internal links.
+        missingPredecessor = true;
+      }
+    } else {
+      if (seq !== prev.sequenceNumber + 1) {
+        return broken("sequence_gap", seq);
+      }
+      if (row.previousHash === GENESIS_HASH) {
+        return broken("unexpected_genesis", seq);
+      }
+      if (row.previousHash !== prev.entryHash) {
+        return broken("previous_hash_mismatch", seq);
+      }
+    }
+
+    const recomputed = computeEntryHash({
+      sequenceNumber: seq,
+      talosId: row.talosId,
+      method: row.method,
+      path: row.path,
+      statusCode: row.statusCode,
+      ipAddress: row.ipAddress,
+      createdAt: row.createdAt.toISOString(),
+    });
+    if (recomputed !== row.entryHash) {
+      return broken("entry_hash_mismatch", seq);
+    }
+
+    prev = row;
+    verifiedCount++;
+  }
+
+  const incompleteReason = missingPredecessor
+    ? ("missing_predecessor" as const)
+    : options.truncated
+      ? ("truncated_range" as const)
+      : null;
+
+  if (incompleteReason !== null) {
+    return {
+      valid: false,
+      status: "incomplete",
+      complete: false,
+      incompleteReason,
+      failureReason: incompleteReason,
+      brokenAtSequence: null,
+      ...base(),
+    };
+  }
+
+  return {
+    valid: true,
+    status: "valid",
+    complete: true,
+    incompleteReason: null,
+    failureReason: null,
+    brokenAtSequence: null,
+    ...base(),
+  };
+}
+
 /**
  * Whether hash chain is enabled for the audit log.
  * Defaults to true (backward-compatible rollout).
@@ -341,6 +526,80 @@ export function isAuditChainEnabled(): boolean {
  */
 export function getChainHmacSecret(): string | null {
   return process.env.AUDIT_HASH_CHAIN_SECRET ?? null;
+}
+
+// ─── Audit Export Filenames ──────────────────────────────────────────────────
+
+/** Supported operator export formats for the admin audit log. */
+export const AUDIT_EXPORT_FORMATS = ["json", "csv"] as const;
+export type AuditExportFormat = (typeof AUDIT_EXPORT_FORMATS)[number];
+
+/** Maximum length of an identifier segment embedded in an export filename. */
+export const MAX_AUDIT_FILENAME_SEGMENT_LENGTH = 64;
+
+/** Maximum total length of a generated export filename. */
+export const MAX_AUDIT_EXPORT_FILENAME_LENGTH = 128;
+
+const SAFE_IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+/**
+ * Normalize an identifier for use in an export filename. Only bounded ASCII
+ * `[A-Za-z0-9_-]` identifiers (not starting with `-`/`_`) are accepted and
+ * lowercased; anything else (Unicode, quotes, separators, CR/LF, path
+ * traversal, oversized input) returns null so untrusted actor text never
+ * reaches a `Content-Disposition` header.
+ */
+export function sanitizeAuditExportIdentifier(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (!value || value.length > MAX_AUDIT_FILENAME_SEGMENT_LENGTH) return null;
+  if (!SAFE_IDENTIFIER_RE.test(value)) return null;
+  return value.toLowerCase();
+}
+
+function formatFilenameTimestamp(d: Date): string {
+  return d.toISOString().replace(/\.\d{3}Z$/, "Z").replace(/[-:]/g, "");
+}
+
+/**
+ * Build a bounded, header-safe export filename:
+ * `audit-logs-<id|all|filtered>[-YYYYMMDDTHHMMSSZ].<format>`.
+ *
+ * A missing identifier yields `all`; an unsafe one yields `filtered` (or
+ * throws in `strict` mode). An invalid timestamp is omitted (or throws in
+ * `strict` mode).
+ */
+export function buildAuditExportFilename(options: {
+  talosId?: string | null;
+  format?: AuditExportFormat;
+  exportedAt?: Date | string | null;
+  strict?: boolean;
+}): string {
+  const format = options.format ?? "json";
+  const rawId = options.talosId;
+
+  let segment = "all";
+  if (rawId !== undefined && rawId !== null && rawId !== "") {
+    const safe = sanitizeAuditExportIdentifier(rawId);
+    if (safe === null) {
+      if (options.strict) throw new Error("Invalid audit export identifier");
+      segment = "filtered";
+    } else {
+      segment = safe;
+    }
+  }
+
+  let timestamp = "";
+  if (options.exportedAt !== undefined && options.exportedAt !== null) {
+    const d = options.exportedAt instanceof Date ? options.exportedAt : new Date(options.exportedAt);
+    if (Number.isNaN(d.getTime())) {
+      if (options.strict) throw new Error("Invalid audit export timestamp");
+    } else {
+      timestamp = `-${formatFilenameTimestamp(d)}`;
+    }
+  }
+
+  return `audit-logs-${segment}${timestamp}.${format}`.slice(0, MAX_AUDIT_EXPORT_FILENAME_LENGTH);
 }
 
 // ─── Independently Verifiable Audit Checkpoint Bundles ───────────────────────
