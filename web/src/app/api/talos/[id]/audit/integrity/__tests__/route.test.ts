@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
@@ -60,7 +60,13 @@ function makeAuditRow(overrides: Partial<Record<string, unknown>> = {}) {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("GET /api/talos/[id]/audit/integrity", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Pin the route's wall clock to the fixtures' NOW so freshness is deterministic.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
 
   it("returns 200 with status=ok when chain is valid and checkpoint is fresh", async () => {
     // agent exists
