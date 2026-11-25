@@ -5,6 +5,8 @@
 import { z } from "zod/v4";
 import { StrKey } from "@stellar/stellar-sdk";
 import { errorResponse } from "./api-response";
+import { RETIREMENT_REASON_MAX_LENGTH } from "./governance/lifecycle";
+import { lifecycleReasonSchema } from "./governance/payloads";
 
 export const stellarAssetCodeSchema = z
   .string()
@@ -435,7 +437,9 @@ export const regenerateKeySchema = z.object({
 // --- Retire Agent ---
 
 export const retireAgentSchema = z.object({
-  reason: z.string().min(1).max(1000),
+  // Validated (never truncated) before persistence and audit emission: non-blank,
+  // no control characters, at most RETIREMENT_REASON_MAX_LENGTH code points.
+  reason: lifecycleReasonSchema(RETIREMENT_REASON_MAX_LENGTH),
   supersededBy: z.string().nullable().optional(),
   stellarPublicKey: z.string().min(1),
   signature: z.string().min(1),
@@ -926,24 +930,3 @@ export function canNextForStep(
       return true;
   }
 }
-
-// --- Revenue Buyback ---
-
-const buybackAmountSchema = z
-  .number()
-  .positive("amount must be greater than zero")
-  .refine(Number.isFinite, "amount must be finite")
-  .refine(
-    (n) => Number(n.toFixed(7)) === n,
-    "amount must have at most 7 decimal places",
-  );
-
-export const buybackSchema = z
-  .object({
-    usdcAmount: buybackAmountSchema.optional(),
-    mitosAmount: buybackAmountSchema.optional(),
-  })
-  .refine(
-    (d) => d.usdcAmount !== undefined || d.mitosAmount !== undefined,
-    { message: "usdcAmount or mitosAmount is required" },
-  );

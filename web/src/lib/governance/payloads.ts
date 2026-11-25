@@ -8,7 +8,13 @@
  */
 import { z } from "zod/v4";
 
-import { LIFECYCLE_ACTIONS, LifecycleError, type LifecycleAction } from "./lifecycle";
+import {
+  LIFECYCLE_ACTIONS,
+  LIFECYCLE_REASON_MAX_LENGTH,
+  LifecycleError,
+  checkLifecycleReason,
+  type LifecycleAction,
+} from "./lifecycle";
 
 const STELLAR_ADDRESS = z
   .string()
@@ -21,7 +27,19 @@ const IDEMPOTENCY_KEY = z
   .max(128)
   .regex(/^[A-Za-z0-9_.:-]+$/, "idempotencyKey must be URL-safe");
 
-const REASON = z.string().min(1).max(500);
+/**
+ * Zod schema for a lifecycle reason (see `checkLifecycleReason`): non-blank,
+ * no control characters, at most `maxLength` code points. Validates only; the
+ * value is never trimmed or truncated.
+ */
+export function lifecycleReasonSchema(maxLength: number = LIFECYCLE_REASON_MAX_LENGTH) {
+  return z.string().superRefine((value, ctx) => {
+    const result = checkLifecycleReason(value, maxLength);
+    if (!result.ok) ctx.addIssue({ code: "custom", message: result.message });
+  });
+}
+
+const REASON = lifecycleReasonSchema(LIFECYCLE_REASON_MAX_LENGTH);
 
 const EXPECTED_STATE = z.enum([
   "proposed",

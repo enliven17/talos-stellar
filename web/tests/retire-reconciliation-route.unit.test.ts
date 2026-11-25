@@ -126,6 +126,8 @@ describe("POST /api/talos/:id/retire - reconciliation and idempotent retries", (
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.select.mockReset();
+    // Readiness check (#1605): no pending jobs, payments, or undistributed revenue.
+    mocks.select.mockReturnValue(selectChain([]));
     mocks.emit.mockResolvedValue({ id: "evt_1", sequence: 1, deduped: false });
     mocks.enqueue.mockResolvedValue({ jobId: "job_1", created: true });
     mocks.loadSummary.mockResolvedValue(null);

@@ -69,6 +69,12 @@ vi.mock("@/lib/governance/events", () => ({
   emitLifecycleEvent: vi.fn(async () => ({ id: "evt_1", sequence: 1, deduped: false })),
 }));
 
+// Retirement reconciliation (#1669) is covered by retire-reconciliation-route.unit.test.ts.
+vi.mock("@/lib/governance/retirement-reconciliation", () => ({
+  enqueueRetirementReconciliation: vi.fn(async () => ({ jobId: "job_1", created: true })),
+  loadRetirementReconciliation: vi.fn(async () => null),
+}));
+
 function selectChain(result: any) {
   const chain: any = {
     from: vi.fn().mockReturnThis(),
@@ -195,6 +201,11 @@ describe("Retire and Lifecycle Checklist Routes", () => {
   });
 
   describe("POST /api/talos/:id/retire", () => {
+    beforeEach(() => {
+      // Readiness check (#1605): no pending jobs, payments, or undistributed revenue.
+      mocks.mockSelect.mockReturnValue(selectChain([]));
+    });
+
     it("returns 409 Conflict when retiring an agent with in-flight jobs and drainJobs is default", async () => {
       const { POST } = await import("../src/app/api/talos/[id]/retire/route");
 
