@@ -7,6 +7,10 @@ import { AgentAvatar } from "@/components/agent-avatar";
 import { LazyFinancialProjectionChart } from "@/components/lazy-financial-projection-chart";
 import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
 import { FinancialStatementButton } from "@/components/financial-statement-button";
+import {
+  FinancialActionAnnouncementRegion,
+  useFinancialActionAnnouncement,
+} from "@/components/financial-action-announcement";
 import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 
@@ -495,6 +499,7 @@ function ApiKeyCell({ masked, raw }: { talosId: string; masked: string | null; r
 }
 
 function DashboardContent({ stats, approvals: initialApprovals, approvalHistory: initialHistory, activities, agents, revenueStreams, talosManagement, observedAt, onRefresh }: DashboardData & { onRefresh: () => void }) {
+  const { announcement, announce } = useFinancialActionAnnouncement();
   const [approvals, setApprovals] = useState(initialApprovals);
   const [approvalHistory, setApprovalHistory] = useState(initialHistory);
   const [approvalTab, setApprovalTab] = useState<"pending" | "history">("pending");
@@ -510,8 +515,11 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
   const router = useRouter();
 
   async function handleDecision(id: string, talosId: string, status: "approved" | "rejected") {
+    const actionId = `${talosId}:approval:${id}:${Date.now()}`;
+    const actionLabel = status === "approved" ? "Approval" : "Rejection";
     setApprovalError(null);
     const target = approvals.find((a) => a.id === id);
+    announce({ actionId, label: actionLabel, outcome: "submitted" });
     try {
       const res = await fetch(`/api/talos/${talosId}/approvals/${id}`, {
         method: "PATCH",
@@ -533,12 +541,15 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
             ...prev,
           ]);
         }
+        announce({ actionId, label: actionLabel, outcome: "confirmed" });
       } else {
         const data = await res.json().catch(() => null);
         setApprovalError(data?.error ?? `Failed to ${status === "approved" ? "approve" : "reject"} (${res.status})`);
+        announce({ actionId, label: actionLabel, outcome: "failed" });
       }
     } catch {
       setApprovalError("Network error — please try again.");
+      announce({ actionId, label: actionLabel, outcome: "failed" });
     }
   }
 
@@ -553,6 +564,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
 
       return (
     <>
+      <FinancialActionAnnouncementRegion announcement={announcement} />
       <TransactionReviewSheet
         open={reviewOpen !== null}
         title={
