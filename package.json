@@ -9,6 +9,8 @@
     "doctor:test": "node --test scripts/doctor.test.mjs",
     "artifacts:check": "node scripts/check-package-artifacts.mjs",
     "test:package-artifacts": "node --test scripts/check-package-artifacts.test.mjs",
+    "release:evidence": "node scripts/release-evidence.mjs",
+    "release:evidence:test": "node --test scripts/release-evidence.test.mjs",
     "build": "pnpm --dir web build",
     "lint": "pnpm --dir web lint",
     "web:install": "pnpm --dir web install",
