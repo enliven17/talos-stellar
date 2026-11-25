@@ -91,7 +91,11 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - `create_proposal(proposer, talos_id, title, description) -> u32`: Create a new proposal with title and description (proposer auth; rejects empty title/description).
   - `vote(voter, proposal_id, choice)`: Cast an `Approve` or `Reject` vote weighted by snapshot balance (voter auth; rejects double voting, zero balance, or ended voting period).
   - `finalize_proposal(proposal_id)`: Finalize status to `Approved` or `Rejected` after voting period ends (permissionless).
-  - `execute_proposal(proposal_id)`: Mark an approved proposal as `Executed` (permissionless).
+  - `execute_proposal(proposal_id)`: Mark an approved proposal as `Executed` (permissionless). When an execution timelock is configured, a proposal that carries an action must first be queued and can execute only in `[eta, eta + grace_period]`.
+  - `set_execution_timelock(admin, config: TimelockConfig)` / `remove_execution_timelock(admin)` / `get_execution_timelock() -> Option<TimelockConfig>`: Opt-in execution delay for proposals that carry an action (admin auth; `min_delay` must be `1..=2_592_000` seconds, `grace_period > 0`). New settings apply to proposals queued afterwards.
+  - `queue_proposal(proposal_id) -> QueuedActionRecord`: Queue an `Approved` proposal that carries an action behind the timelock (permissionless). Writes an immutable record `{ action_digest, queued_at, eta, grace_period }` and moves the proposal to `Queued`.
+  - `cancel_queued_proposal(admin, proposal_id) -> CancellationRecord`: Cancel a `Queued` proposal during its delay (admin auth; only while `now < eta`, rejected with `Cancellation window closed` from the ETA on; not blocked by a governance pause). Writes an immutable record `{ cancelled_by, cancelled_at, eta }`, keeps the queue record, and moves the proposal to `Cancelled`. The proposer's `cancel_proposal` is unchanged (active proposals with no votes only).
+  - `get_queued_action(proposal_id) -> Option<QueuedActionRecord>` / `get_queue_cancellation(proposal_id) -> Option<CancellationRecord>`: The retained, verifiable record of queued and cancelled intent.
   - `get_proposal(proposal_id) -> Option<Proposal>`: Read proposal struct and current tallies.
   - `get_vote(proposal_id, voter) -> Option<Vote>`: Read a voter's cast vote.
   - `get_proposal_action_digest(proposal_id) -> Option<BytesN<32>>`: Canonical approved action digest.

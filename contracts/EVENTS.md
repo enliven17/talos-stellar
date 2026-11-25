@@ -91,6 +91,14 @@ Governance action proposals store a domain-separated digest of their canonical a
 
 `qrm_rchd` is emitted **at most once** per proposal, on the first vote that brings `votes_cast` to or above `quorum_threshold`. A `DataKey::QuorumReached(proposal_id)` sentinel prevents re-emission for subsequent votes.
 
+Execution timelock and delayed cancellation (#1373). These reuse the shared `admin_controls` timelock topics; for governance the `action` slot carries the proposal's canonical action digest:
+
+| topics | data | when |
+|---|---|---|
+| (`tl_cfg`,) | (old_min_delay: u64, new_min_delay: u64, grace_period: u64) | `set_execution_timelock` / `remove_execution_timelock` (`new_min_delay = 0` on removal) |
+| (`tl_sch`, proposal_id: u64) | (action_digest: BytesN<32>, eta: u64, proposer: Address) | `queue_proposal`; followed by `prop_stat` = `Queued` |
+| (`tl_cnl`, proposal_id: u64) | (action_digest: BytesN<32>, canceller: Address) | `cancel_queued_proposal` (admin, before `eta`); followed by `prop_stat` = `Cancelled` |
+
 ### talos_name_service
 | topics | data |
 |---|---|
@@ -139,7 +147,7 @@ the source creator cancels.
 | (`adm_cnl`,) | (cancelled: Address,) |
 
 `VoteChoice` is `{ Approve | Reject }`; `ProposalStatus` is
-`{ Active | Approved | Rejected | Executed }`; `PatronRole` is
+`{ Active | Approved | Rejected | Executed | Cancelled | Queued }`; `PatronRole` is
 `{ Creator | Investor | Treasury }`. These enums are `#[contracttype]` and
 additive-only (new variants are appended at the end).
 
