@@ -27,6 +27,15 @@ expected range and observed version. The JSON report preserves the doctor's
 stable exit codes. Run its mocked platform-independent checks with
 `pnpm doctor:test`.
 
+For an offline-reviewable release evidence bundle, run
+`pnpm release:evidence -- --baseline <full-commit-sha>` with required check
+IDs, check results, and sanitized artifact paths. Missing required checks are
+recorded as `not-run`; the generator embeds artifact bytes and SHA-256 digests,
+and refuses environment files, secret-bearing content, and paths outside the
+repository. See [Release evidence bundle](docs/release-evidence.md) for the
+complete options and privacy limits. Run its focused tests with
+`pnpm release:evidence:test`.
+
 The supported Node.js, pnpm, Python, Rust, and schema versions are recorded in
 [`compatibility.json`](compatibility.json) and checked with
 `pnpm run compat:check`. See [`docs/compatibility.md`](docs/compatibility.md)
