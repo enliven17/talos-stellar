@@ -149,12 +149,26 @@ async function main(args = process.argv.slice(2)) {
     const root = process.cwd();
     const bundle = await buildEvidenceBundle({ ...options, root });
     const outputPath = options.outputPath ?? "dist/release-evidence.json";
-    if (path.isAbsolute(outputPath) || path.resolve(root, outputPath) === root ||
+    if (path.isAbsolute(outputPath) || /^[a-z]:[\\/]/i.test(outputPath) ||
+        outputPath.startsWith("\\\\") || path.resolve(root, outputPath) === root ||
         !path.resolve(root, outputPath).startsWith(root + path.sep)) {
       throw new Error("Output path must be inside the repository");
     }
     const absoluteOutput = path.resolve(root, outputPath);
     await mkdir(path.dirname(absoluteOutput), { recursive: true });
+    const rootReal = await realpath(root);
+    const parentReal = await realpath(path.dirname(absoluteOutput));
+    if (parentReal !== rootReal && !parentReal.startsWith(rootReal + path.sep)) {
+      throw new Error("Output path must resolve inside the repository");
+    }
+    try {
+      const existing = await lstat(absoluteOutput);
+      if (existing.isSymbolicLink() || !existing.isFile()) {
+        throw new Error("Output must be a regular, non-symlink file");
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
     await writeFile(absoluteOutput, `${JSON.stringify(bundle, null, 2)}\n`, { flag: "w" });
     console.log(`Release evidence bundle written to ${path.relative(root, absoluteOutput)}`);
   } catch (error) {
