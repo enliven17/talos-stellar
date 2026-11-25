@@ -133,6 +133,7 @@ time, and an expired proposal cannot be accepted.
 | `quorum_state`      | `get_proposal_quorum_state` query; `EventQuorumReached` emitted once per proposal when quorum is first crossed. |
 | `execution_receipts` | `get_proposal_action_digest` / `get_execution_receipt`; canonical action digest checked before execution. |
 | `proposal_threshold`| `create_proposal` requires the proposer's snapshot voting power to meet `proposal_threshold` (default `0` preserves prior behavior). |
+| `execution_timelock`| Opt-in delay for proposals that carry an action (#1373): `set_execution_timelock` / `remove_execution_timelock` / `get_execution_timelock` (admin), `queue_proposal` (permissionless), `cancel_queued_proposal` (admin, before `eta`), `get_queued_action` / `get_queue_cancellation`. With no timelock set, approved proposals execute immediately as before. |
 
 ### TalosDividends
 

@@ -19,7 +19,12 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 use ttl_manager;
-use admin_controls::{canonical_action_digest, emit_execution_receipt, ExecutionReceipt};
+use admin_controls::{
+    build_cancellation_record, build_queue_record, canonical_action_digest,
+    emit_execution_receipt, emit_timelock_cancelled_raw, emit_timelock_config_changed,
+    emit_timelock_scheduled_raw, validate_queue_config, validate_queued_execution,
+    CancellationRecord, ExecutionReceipt, QueuedActionRecord, TimelockConfig,
+};
 use pause_control;
 
 // ── ProposalAction (#913) ────────────────────────────────────────────
@@ -133,6 +138,10 @@ pub enum ProposalStatus {
     Rejected,
     Executed,
     Cancelled,
+    /// Approved and queued behind the execution timelock (#1373). Executable
+    /// in `[eta, eta + grace_period]`; cancellable by the admin before `eta`.
+    /// Only used when an execution timelock is configured.
+    Queued,
 }
 
 #[contracttype]
@@ -232,6 +241,13 @@ pub enum DataKey {
     /// Value: the `proposal_id` of the first execution (for auditability).
     /// Global duplicate-action guard keyed by canonical action digest.
     ExecutionReceipt(BytesN<32>),
+    /// Optional execution timelock for proposals that carry an action (#1373).
+    /// Absent → approved proposals execute immediately (legacy behaviour).
+    ExecutionTimelock,
+    /// Immutable record written when a proposal is queued (#1373).
+    QueuedAction(u32),
+    /// Immutable record written when a queued proposal is cancelled (#1373).
+    QueueCancellation(u32),
 }
 
 #[contracttype]
@@ -639,6 +655,7 @@ pub fn features_list() -> &'static [&'static str] {
         "interface_query",    // version / interface_id / supports_version
         "quorum_state",       // get_proposal_quorum_state / EventQuorumReached
         "execution_receipts", // immutable action digests and execution receipts
+        "execution_timelock", // queue_proposal / cancel_queued_proposal (#1373)
     ]
 }
 
@@ -1055,8 +1072,17 @@ impl TalosGovernance {
             .get(&DataKey::Proposal(proposal_id))
             .expect("Proposal not found");
 
-        if proposal.status != ProposalStatus::Approved {
-            panic!("Proposal is not approved");
+        // With an execution timelock configured (#1373), a proposal that carries
+        // an action must be queued first and executes only inside its window.
+        // Without one, an approved proposal executes immediately (legacy).
+        let timelocked = proposal.action.is_some()
+            && env.storage().persistent().has(&DataKey::ExecutionTimelock);
+        match proposal.status {
+            ProposalStatus::Approved if timelocked => {
+                panic!("Proposal must be queued before execution")
+            }
+            ProposalStatus::Approved | ProposalStatus::Queued => {}
+            _ => panic!("Proposal is not approved"),
         }
 
         let action_digest = canonical_action_digest(&env, "TalosGovernance", &proposal.action);
@@ -1072,6 +1098,15 @@ impl TalosGovernance {
             env.storage()
                 .persistent()
                 .set(&DataKey::ProposalActionDigest(proposal_id), &approved_digest);
+        }
+
+        if proposal.status == ProposalStatus::Queued {
+            let record: QueuedActionRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::QueuedAction(proposal_id))
+                .expect("Queue record not found");
+            validate_queued_execution(&env, &record, &approved_digest);
         }
 
         // Dispatch only after confirming the current payload matches the
@@ -1188,6 +1223,181 @@ impl TalosGovernance {
                 emit_proposal_executed(env, proposal_id, Symbol::new(env, "UpdateConfig"));
             }
         }
+    }
+
+    // ── Execution timelock and delayed cancellation (#1373) ──────────
+
+    /// Configure the execution timelock for proposals that carry an action
+    /// (admin only). Once set, such proposals must be queued with
+    /// [`TalosGovernance::queue_proposal`] after approval and can execute only
+    /// in `[eta, eta + grace_period]`, giving the admin `min_delay` seconds to
+    /// cancel a harmful action. Signal proposals (no action) are unaffected.
+    ///
+    /// A new config applies to proposals queued afterwards; already queued
+    /// proposals keep the ETA and grace period recorded when they were queued.
+    ///
+    /// # Panics
+    /// - `"Queue delay must be positive"`, `"Grace period must be positive"`,
+    ///   `"Min delay exceeds maximum limit"` — invalid config
+    pub fn set_execution_timelock(env: Env, admin: Address, config: TimelockConfig) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
+        Self::require_admin(&env, &admin);
+        validate_queue_config(&config);
+        let old_min_delay = env
+            .storage()
+            .persistent()
+            .get::<_, TimelockConfig>(&DataKey::ExecutionTimelock)
+            .map(|c| c.min_delay)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ExecutionTimelock, &config);
+        emit_timelock_config_changed(&env, old_min_delay, config.min_delay, config.grace_period);
+    }
+
+    /// Remove the execution timelock (admin only), restoring immediate
+    /// execution of approved proposals. Proposals already queued stay queued
+    /// and remain bound to their recorded window.
+    pub fn remove_execution_timelock(env: Env, admin: Address) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
+        Self::require_admin(&env, &admin);
+        let old: Option<TimelockConfig> = env.storage().persistent().get(&DataKey::ExecutionTimelock);
+        if let Some(old) = old {
+            env.storage().persistent().remove(&DataKey::ExecutionTimelock);
+            emit_timelock_config_changed(&env, old.min_delay, 0, old.grace_period);
+        }
+    }
+
+    /// The configured execution timelock, if any.
+    pub fn get_execution_timelock(env: Env) -> Option<TimelockConfig> {
+        env.storage().persistent().get(&DataKey::ExecutionTimelock)
+    }
+
+    /// Queue an approved proposal that carries an action behind the execution
+    /// timelock. Permissionless, like `finalize_proposal`: approval was
+    /// already decided by the vote, and queuing only starts the delay.
+    ///
+    /// Writes an immutable [`QueuedActionRecord`] (action digest, queued_at,
+    /// eta, grace_period), moves the proposal to `Queued`, and emits `tl_sch`
+    /// `(proposal_id) → (action_digest, eta, proposer)`.
+    ///
+    /// # Panics
+    /// - `"Proposal is not approved"` — status is not `Approved`
+    /// - `"Proposal has no action to queue"` — signal proposal
+    /// - `"Execution timelock not configured"`
+    /// - `"Proposal action digest mismatch"` — action differs from the approved one
+    pub fn queue_proposal(env: Env, proposal_id: u32) -> QueuedActionRecord {
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .expect("Proposal not found");
+
+        if proposal.status != ProposalStatus::Approved {
+            panic!("Proposal is not approved");
+        }
+        if proposal.action.is_none() {
+            panic!("Proposal has no action to queue");
+        }
+        let config: TimelockConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExecutionTimelock)
+            .expect("Execution timelock not configured");
+
+        let action_digest = canonical_action_digest(&env, "TalosGovernance", &proposal.action);
+        let stored_digest: Option<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ProposalActionDigest(proposal_id));
+        match stored_digest {
+            Some(stored) if stored != action_digest => panic!("Proposal action digest mismatch"),
+            Some(_) => {}
+            None => env
+                .storage()
+                .persistent()
+                .set(&DataKey::ProposalActionDigest(proposal_id), &action_digest),
+        }
+
+        let record = build_queue_record(&env, action_digest.clone(), &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::QueuedAction(proposal_id), &record);
+        proposal.status = ProposalStatus::Queued;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        emit_timelock_scheduled_raw(
+            &env,
+            proposal_id as u64,
+            action_digest,
+            record.eta,
+            proposal.proposer.clone(),
+        );
+        emit_proposal_status_changed(&env, proposal_id, ProposalStatus::Queued);
+        record
+    }
+
+    /// Cancel a queued proposal during its delay (admin only).
+    ///
+    /// Who: the governance admin. The proposer's `cancel_proposal` still only
+    /// covers active proposals with no votes; after a successful vote only the
+    /// admin can veto. When: only while `Queued` and before `eta`; once the ETA
+    /// is reached the approved outcome stands. Not blocked by a governance
+    /// pause, so a harmful action can always be stopped during its delay.
+    ///
+    /// Writes an immutable [`CancellationRecord`] (cancelled_by, cancelled_at,
+    /// eta), keeps the queue record, moves the proposal to `Cancelled`, and
+    /// emits `tl_cnl` `(proposal_id) → (action_digest, admin)`.
+    ///
+    /// # Panics
+    /// - `"Unauthorized admin"` — caller is not the admin
+    /// - `"Proposal is not queued"` — status is not `Queued`
+    /// - `"Cancellation window closed"` — `now >= eta`
+    pub fn cancel_queued_proposal(
+        env: Env,
+        admin: Address,
+        proposal_id: u32,
+    ) -> CancellationRecord {
+        Self::require_admin(&env, &admin);
+
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .expect("Proposal not found");
+        if proposal.status != ProposalStatus::Queued {
+            panic!("Proposal is not queued");
+        }
+        let record: QueuedActionRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::QueuedAction(proposal_id))
+            .expect("Queue record not found");
+
+        let cancellation = build_cancellation_record(&env, &record, admin.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::QueueCancellation(proposal_id), &cancellation);
+        proposal.status = ProposalStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        emit_timelock_cancelled_raw(&env, proposal_id as u64, record.action_digest, admin);
+        emit_proposal_status_changed(&env, proposal_id, ProposalStatus::Cancelled);
+        cancellation
+    }
+
+    /// The immutable queue record for a proposal, if it was ever queued.
+    pub fn get_queued_action(env: Env, proposal_id: u32) -> Option<QueuedActionRecord> {
+        env.storage().persistent().get(&DataKey::QueuedAction(proposal_id))
+    }
+
+    /// The immutable cancellation record for a queued proposal, if cancelled.
+    pub fn get_queue_cancellation(env: Env, proposal_id: u32) -> Option<CancellationRecord> {
+        env.storage().persistent().get(&DataKey::QueueCancellation(proposal_id))
     }
 
     /// Create a proposal carrying an optional typed action.
@@ -1908,6 +2118,12 @@ impl TalosGovernance {
             if let Some(receipt) = e.storage().persistent().get::<_, ExecutionReceipt>(&DataKey::ProposalExecutionReceipt(proposal_id)) {
                 e.storage().persistent().set(&DataKey::ProposalExecutionReceipt(proposal_id), &receipt);
             }
+            if let Some(queued) = e.storage().persistent().get::<_, QueuedActionRecord>(&DataKey::QueuedAction(proposal_id)) {
+                e.storage().persistent().set(&DataKey::QueuedAction(proposal_id), &queued);
+            }
+            if let Some(cancelled) = e.storage().persistent().get::<_, CancellationRecord>(&DataKey::QueueCancellation(proposal_id)) {
+                e.storage().persistent().set(&DataKey::QueueCancellation(proposal_id), &cancelled);
+            }
             ttl_manager::emit_ttl_touched(&e, "proposal", 1);
             true
         } else {
@@ -2042,6 +2258,12 @@ impl TalosGovernance {
                 }
                 if let Some(receipt) = e.storage().persistent().get::<_, ExecutionReceipt>(&DataKey::ProposalExecutionReceipt(pid)) {
                     e.storage().persistent().set(&DataKey::ProposalExecutionReceipt(pid), &receipt);
+                }
+                if let Some(queued) = e.storage().persistent().get::<_, QueuedActionRecord>(&DataKey::QueuedAction(pid)) {
+                    e.storage().persistent().set(&DataKey::QueuedAction(pid), &queued);
+                }
+                if let Some(cancelled) = e.storage().persistent().get::<_, CancellationRecord>(&DataKey::QueueCancellation(pid)) {
+                    e.storage().persistent().set(&DataKey::QueueCancellation(pid), &cancelled);
                 }
                 sweep.record(ttl_manager::EntryOutcome::Touched);
             } else {

@@ -16,6 +16,7 @@
 //! | Timelock events | [`emit_timelock_scheduled`], [`emit_timelock_executed`], [`emit_timelock_cancelled`], [`emit_timelock_config_changed`] |
 //! | Timelock validation | [`validate_timelock_config`], [`validate_delay`], [`validate_executable`] |
 //! | Action receipts | [`canonical_action_digest`], [`ExecutionReceipt`], [`emit_execution_receipt`] |
+//! | Queued actions & delayed cancellation | [`QueuedActionRecord`], [`CancellationRecord`], [`QueuedActionStage`], [`queued_action_stage`], [`validate_queue_config`], [`build_queue_record`], [`validate_cancellable`], [`build_cancellation_record`], [`validate_queued_execution`] |
 //! | Guardian events | [`emit_guardian_added`], [`emit_guardian_removed`] |
 //! | Guardian helpers | [`add_guardian`], [`remove_guardian`], [`is_guardian`], [`list_guardians`] |
 //! | Pause events | [`emit_pause_set`], [`emit_pause_cleared`] |
@@ -232,6 +233,148 @@ pub fn validate_executable(env: &Env, eta: u64, grace_period: u64) {
     }
 }
 
+// ── Queued actions and delayed cancellation ───────────────────────────
+//
+// A privileged action that has been approved can be *queued* behind a
+// timelock: it becomes executable at `eta = queued_at + min_delay` and stays
+// executable until `eta + grace_period`. The delay exists so that the
+// privileged authority can veto a harmful action before it takes effect:
+//
+// | Stage        | Window                         | Cancel | Execute |
+// |--------------|--------------------------------|--------|---------|
+// | `Pending`    | `now <  eta`                   | yes    | no      |
+// | `Executable` | `eta <= now <= eta + grace`    | no     | yes     |
+// | `Expired`    | `now >  eta + grace`           | no     | no      |
+//
+// Cancellation is only possible while the action is still `Pending`; once the
+// ETA is reached the approved outcome stands. The records below are written
+// once and never deleted, so the queued intent and its cancellation remain
+// verifiable after the fact. Which actor may cancel is decided by the calling
+// contract (it performs `require_auth`); these helpers enforce *when*.
+
+/// Immutable record of an action queued behind a timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedActionRecord {
+    /// Canonical digest of the queued action (see [`canonical_action_digest`]).
+    pub action_digest: BytesN<32>,
+    /// Ledger timestamp at which the action was queued.
+    pub queued_at: u64,
+    /// Earliest ledger timestamp at which the action may execute.
+    pub eta: u64,
+    /// Seconds after `eta` during which the action remains executable.
+    pub grace_period: u64,
+}
+
+/// Immutable record of a queued action cancelled during its delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancellationRecord {
+    /// Address that authorised the cancellation.
+    pub cancelled_by: Address,
+    /// Ledger timestamp of the cancellation (always `< eta`).
+    pub cancelled_at: u64,
+    /// The queue record's ETA, kept alongside for self-contained verification.
+    pub eta: u64,
+}
+
+/// Stage of a queued action relative to the current ledger time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueuedActionStage {
+    /// Delay not elapsed: cancellable, not yet executable.
+    Pending,
+    /// Within `[eta, eta + grace_period]`: executable, no longer cancellable.
+    Executable,
+    /// Grace period elapsed: neither executable nor cancellable.
+    Expired,
+}
+
+/// Classify `record` at ledger time `now`.
+pub fn queued_action_stage(record: &QueuedActionRecord, now: u64) -> QueuedActionStage {
+    if now < record.eta {
+        QueuedActionStage::Pending
+    } else if now <= record.eta.saturating_add(record.grace_period) {
+        QueuedActionStage::Executable
+    } else {
+        QueuedActionStage::Expired
+    }
+}
+
+/// Validate an execution timelock for queued actions: a valid
+/// [`TimelockConfig`] (see [`validate_timelock_config`]) with a non-zero
+/// delay, since a zero delay would leave no window in which to cancel.
+///
+/// # Panics
+/// - `"Queue delay must be positive"` — `min_delay == 0`
+/// - plus the panics of [`validate_timelock_config`]
+pub fn validate_queue_config(config: &TimelockConfig) {
+    if config.min_delay == 0 {
+        panic!("Queue delay must be positive");
+    }
+    validate_timelock_config(config.min_delay, config.grace_period);
+}
+
+/// Build the queue record for `action_digest` queued now under `config`.
+///
+/// # Panics
+/// - `"Queue ETA overflows"` — `now + min_delay` does not fit in `u64`
+/// - plus the panics of [`validate_queue_config`]
+pub fn build_queue_record(
+    env: &Env,
+    action_digest: BytesN<32>,
+    config: &TimelockConfig,
+) -> QueuedActionRecord {
+    validate_queue_config(config);
+    let queued_at = env.ledger().timestamp();
+    let eta = queued_at
+        .checked_add(config.min_delay)
+        .unwrap_or_else(|| panic!("Queue ETA overflows"));
+    QueuedActionRecord {
+        action_digest,
+        queued_at,
+        eta,
+        grace_period: config.grace_period,
+    }
+}
+
+/// Check that `record` may still be cancelled (it is `Pending`).
+///
+/// # Panics
+/// - `"Cancellation window closed"` — `now >= eta`
+pub fn validate_cancellable(env: &Env, record: &QueuedActionRecord) {
+    if queued_action_stage(record, env.ledger().timestamp()) != QueuedActionStage::Pending {
+        panic!("Cancellation window closed");
+    }
+}
+
+/// Validate that `record` may be cancelled now and build the cancellation
+/// record attributed to `canceller` (whose authorisation the caller checks).
+pub fn build_cancellation_record(
+    env: &Env,
+    record: &QueuedActionRecord,
+    canceller: Address,
+) -> CancellationRecord {
+    validate_cancellable(env, record);
+    CancellationRecord {
+        cancelled_by: canceller,
+        cancelled_at: env.ledger().timestamp(),
+        eta: record.eta,
+    }
+}
+
+/// Check that a queued action may execute now and still carries the digest it
+/// was queued with.
+///
+/// # Panics
+/// - `"Queued action digest mismatch"` — `action_digest != record.action_digest`
+/// - `"Timelock delay not met"` / `"Proposal expired"` — see [`validate_executable`]
+pub fn validate_queued_execution(env: &Env, record: &QueuedActionRecord, action_digest: &BytesN<32>) {
+    if *action_digest != record.action_digest {
+        panic!("Queued action digest mismatch");
+    }
+    validate_executable(env, record.eta, record.grace_period);
+}
+
 // ── Guardian event emitters ───────────────────────────────────────────
 
 /// Emit `guard_add` — a guardian was registered.
@@ -444,6 +587,130 @@ mod tests {
         // it has expired. (At the default timestamp 0 it is still executable.)
         env.ledger().set_timestamp(1);
         validate_executable(&env, 0, 0);
+    }
+
+    // ── queued actions / delayed cancellation ────────────────────────
+
+    fn digest(env: &Env, byte: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[byte; 32])
+    }
+
+    fn queue_config() -> TimelockConfig {
+        TimelockConfig { min_delay: 3_600, grace_period: 86_400 }
+    }
+
+    #[test]
+    fn build_queue_record_sets_eta_from_delay() {
+        let env = setup();
+        env.ledger().set_timestamp(1_000);
+        let record = build_queue_record(&env, digest(&env, 1), &queue_config());
+        assert_eq!(
+            record,
+            QueuedActionRecord {
+                action_digest: digest(&env, 1),
+                queued_at: 1_000,
+                eta: 4_600,
+                grace_period: 86_400,
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Queue delay must be positive")]
+    fn build_queue_record_rejects_zero_delay() {
+        let env = setup();
+        build_queue_record(&env, digest(&env, 1), &TimelockConfig { min_delay: 0, grace_period: 1 });
+    }
+
+    #[test]
+    #[should_panic(expected = "Grace period must be positive")]
+    fn build_queue_record_rejects_zero_grace() {
+        let env = setup();
+        build_queue_record(&env, digest(&env, 1), &TimelockConfig { min_delay: 1, grace_period: 0 });
+    }
+
+    #[test]
+    #[should_panic(expected = "Queue ETA overflows")]
+    fn build_queue_record_rejects_eta_overflow() {
+        let env = setup();
+        env.ledger().set_timestamp(u64::MAX - 10);
+        build_queue_record(&env, digest(&env, 1), &queue_config());
+    }
+
+    #[test]
+    fn queued_action_stage_boundaries() {
+        let record = QueuedActionRecord {
+            action_digest: digest(&setup(), 1),
+            queued_at: 0,
+            eta: 100,
+            grace_period: 50,
+        };
+        assert_eq!(queued_action_stage(&record, 99), QueuedActionStage::Pending);
+        assert_eq!(queued_action_stage(&record, 100), QueuedActionStage::Executable);
+        assert_eq!(queued_action_stage(&record, 150), QueuedActionStage::Executable);
+        assert_eq!(queued_action_stage(&record, 151), QueuedActionStage::Expired);
+    }
+
+    #[test]
+    fn cancellation_allowed_until_one_second_before_eta() {
+        let env = setup();
+        env.ledger().set_timestamp(1_000);
+        let record = build_queue_record(&env, digest(&env, 1), &queue_config());
+        let canceller = Address::generate(&env);
+
+        env.ledger().set_timestamp(record.eta - 1);
+        let cancellation = build_cancellation_record(&env, &record, canceller.clone());
+        assert_eq!(
+            cancellation,
+            CancellationRecord { cancelled_by: canceller, cancelled_at: record.eta - 1, eta: record.eta }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Cancellation window closed")]
+    fn cancellation_rejected_at_eta() {
+        let env = setup();
+        env.ledger().set_timestamp(1_000);
+        let record = build_queue_record(&env, digest(&env, 1), &queue_config());
+        env.ledger().set_timestamp(record.eta);
+        build_cancellation_record(&env, &record, Address::generate(&env));
+    }
+
+    #[test]
+    #[should_panic(expected = "Cancellation window closed")]
+    fn cancellation_rejected_after_expiry() {
+        let env = setup();
+        let record = build_queue_record(&env, digest(&env, 1), &queue_config());
+        env.ledger().set_timestamp(record.eta + record.grace_period + 1);
+        validate_cancellable(&env, &record);
+    }
+
+    #[test]
+    fn queued_execution_allowed_within_window() {
+        let env = setup();
+        let record = build_queue_record(&env, digest(&env, 1), &queue_config());
+        env.ledger().set_timestamp(record.eta);
+        validate_queued_execution(&env, &record, &digest(&env, 1));
+        env.ledger().set_timestamp(record.eta + record.grace_period);
+        validate_queued_execution(&env, &record, &digest(&env, 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Timelock delay not met")]
+    fn queued_execution_rejected_before_eta() {
+        let env = setup();
+        let record = build_queue_record(&env, digest(&env, 1), &queue_config());
+        env.ledger().set_timestamp(record.eta - 1);
+        validate_queued_execution(&env, &record, &digest(&env, 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Queued action digest mismatch")]
+    fn queued_execution_rejects_a_different_action() {
+        let env = setup();
+        let record = build_queue_record(&env, digest(&env, 1), &queue_config());
+        env.ledger().set_timestamp(record.eta);
+        validate_queued_execution(&env, &record, &digest(&env, 2));
     }
 
     // ── add_guardian / remove_guardian / is_guardian ─────────────────
