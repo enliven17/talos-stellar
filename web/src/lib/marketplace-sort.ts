@@ -232,3 +232,144 @@ export function parseDirectoryCategoryFilter(
   }
   return { ok: true, category: trimmed };
 }
+
+// ---------------------------------------------------------------------------
+// Marketplace search (GET /api/marketplace/search) — capability filter
+// ---------------------------------------------------------------------------
+
+/** Maximum number of capability IDs accepted in one search request. */
+export const MAX_CAPABILITY_FILTERS = 50;
+
+/** Maximum length of a single capability ID. */
+export const MAX_CAPABILITY_ID_LENGTH = 128;
+
+/**
+ * Machine-readable reason a marketplace filter was rejected.
+ *
+ * - `invalid_filter`:         the value is malformed (wrong JSON shape,
+ *                             non-string or oversized IDs, too many IDs).
+ * - `unsupported_capability`: the value is well formed but names capability
+ *                             IDs that are not in the active vocabulary.
+ */
+export type MarketplaceFilterErrorCode = "invalid_filter" | "unsupported_capability";
+
+/**
+ * Typed validation result returned (HTTP 400) for a rejected marketplace
+ * filter. A valid filter that matches nothing is NOT an error: it returns an
+ * ordinary empty result list.
+ */
+export interface MarketplaceFilterValidationError {
+  error: string;
+  code: MarketplaceFilterErrorCode;
+  field: "capabilities";
+  fieldErrors: { capabilities: string };
+  /** Requested IDs that are not active capabilities (`unsupported_capability` only). */
+  unsupportedCapabilities?: string[];
+}
+
+export type ParseCapabilityFilterResult =
+  | { ok: true; capabilityIds: string[] }
+  | { ok: false; error: MarketplaceFilterValidationError };
+
+function capabilityFilterError(
+  code: MarketplaceFilterErrorCode,
+  message: string,
+  unsupportedCapabilities?: string[],
+): { ok: false; error: MarketplaceFilterValidationError } {
+  return {
+    ok: false,
+    error: {
+      error: message,
+      code,
+      field: "capabilities",
+      fieldErrors: { capabilities: message },
+      ...(unsupportedCapabilities ? { unsupportedCapabilities } : {}),
+    },
+  };
+}
+
+/**
+ * Parse the `capabilities` query value: a JSON array of IDs
+ * (`["id-1","id-2"]`) or, for compatibility, a comma-separated list
+ * (`id-1,id-2`). Absent, empty, `[]`, and blank entries mean "no capability
+ * filter". IDs are trimmed and de-duplicated, preserving order.
+ */
+export function parseCapabilityFilter(raw: string | null): ParseCapabilityFilterResult {
+  if (raw === null || raw.trim() === "") return { ok: true, capabilityIds: [] };
+
+  let candidates: unknown[];
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("[") || trimmed.startsWith("{") || trimmed.startsWith('"')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return capabilityFilterError(
+        "invalid_filter",
+        "capabilities must be a JSON array of capability IDs or a comma-separated list",
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      return capabilityFilterError(
+        "invalid_filter",
+        "capabilities must be a JSON array of capability IDs",
+      );
+    }
+    candidates = parsed;
+  } else {
+    candidates = trimmed.split(",");
+  }
+
+  const ids: string[] = [];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      return capabilityFilterError("invalid_filter", "capability IDs must be strings");
+    }
+    const id = candidate.trim();
+    if (id.length === 0) continue;
+    if (id.length > MAX_CAPABILITY_ID_LENGTH) {
+      return capabilityFilterError(
+        "invalid_filter",
+        `capability IDs must be ${MAX_CAPABILITY_ID_LENGTH} characters or fewer`,
+      );
+    }
+    if (!ids.includes(id)) ids.push(id);
+  }
+
+  if (ids.length > MAX_CAPABILITY_FILTERS) {
+    return capabilityFilterError(
+      "invalid_filter",
+      `at most ${MAX_CAPABILITY_FILTERS} capability IDs may be requested`,
+    );
+  }
+
+  return { ok: true, capabilityIds: ids };
+}
+
+/**
+ * Check requested capability IDs against the supported (active) vocabulary.
+ * Unknown or inactive IDs yield an `unsupported_capability` result listing
+ * every offending ID; otherwise the IDs are returned unchanged.
+ */
+export function validateSupportedCapabilities(
+  capabilityIds: readonly string[],
+  supportedIds: Iterable<string>,
+): ParseCapabilityFilterResult {
+  const supported = new Set(supportedIds);
+  const unsupported = capabilityIds.filter((id) => !supported.has(id));
+  if (unsupported.length > 0) {
+    return capabilityFilterError(
+      "unsupported_capability",
+      `Unsupported capability filter: ${unsupported.join(", ")}`,
+      unsupported,
+    );
+  }
+  return { ok: true, capabilityIds: [...capabilityIds] };
+}
+
+/** Build the HTTP 400 response for a rejected marketplace filter. */
+export function marketplaceFilterErrorResponse(
+  error: MarketplaceFilterValidationError,
+): Response {
+  return Response.json(error, { status: 400 });
+}

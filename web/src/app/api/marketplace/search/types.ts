@@ -35,3 +35,14 @@ export interface MarketplaceSearchResponse {
     capabilities: CapabilityFilter[];
   };
 }
+
+/**
+ * HTTP 400 body for a rejected capability filter. `code` distinguishes a
+ * malformed value (`invalid_filter`) from a well-formed request for
+ * capabilities that are not active (`unsupported_capability`). A valid filter
+ * with no matching items is not an error and returns an empty `results` list.
+ */
+export type {
+  MarketplaceFilterErrorCode,
+  MarketplaceFilterValidationError,
+} from '@/lib/marketplace-sort';
