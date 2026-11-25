@@ -4,10 +4,18 @@ import {
   GENESIS_HASH,
   AUDIT_CHAIN_VERSION,
   verifyAuditCheckpointBundle,
+  type AuditChainEntry,
 } from "../src/lib/audit-chain";
+import {
+  AuditLogFilterError,
+  MAX_CURSOR_LEN,
+  MAX_Q_LEN,
+  MAX_TALOS_ID_LEN,
+} from "../src/lib/audit-log/filters";
 import {
   listAuditLogs,
   exportAuditCheckpointBundle,
+  verifyAuditChainRange,
 } from "../src/lib/audit-log/store";
 
 const { mockDb } = vi.hoisted(() => ({
